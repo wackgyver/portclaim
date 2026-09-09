@@ -11,8 +11,9 @@ Site IPs, keys, and tokens belong in env vars or a local `ONBOARDING.md`
 deploy a hub, and how to hang extra mappers off a claim.
 
 Display name is **PortClaim** (one PascalCase token). Slug `portclaim`.
-systemd `usb-loom-hub`, env `USB_LOOM_*`, and header `X-Usb-Loom-Token`
-are compatibility aliases until a dedicated hub cut.
+That is the product. **usb-loom** is the engine: systemd `usb-loom-hub`,
+env `USB_LOOM_*`, header `X-Usb-Loom-Token`, `/usr/local/lib/usb-loom/`.
+Those names stay. They are not a rename backlog.
 
 ---
 
@@ -582,4 +583,3 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 - Moving the hub into an LXC (host is correct until RAM says otherwise).
 - Off-LAN / overlay VPN (Tailscale, UniFi Teleport, travel hub): untested.
   Not verified. Not a security claim.
-- Renaming systemd `usb-loom-hub` / `USB_LOOM_*` to PortClaim (needs a hub cut).

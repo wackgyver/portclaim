@@ -1,6 +1,6 @@
 #!/bin/sh
 # Headless usb-loom hub on Debian 12/13 or a privileged LXC.
-# Unit name usb-loom-hub is a compatibility alias; product display is PortClaim.
+# usb-loom is the engine; PortClaim is the product display name.
 set -eu
 
 TOKEN="${USB_LOOM_TOKEN:-}"
