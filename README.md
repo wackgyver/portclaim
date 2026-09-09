@@ -2,9 +2,9 @@
 
 LAN claim fabric for input devices. A dedicated Linux USB hub owns the
 physical ports, the device drivers, and the on-wire protocols. Any machine
-with a Receiver **claims** a device from a dropdown and injects. Video and
-desktop audio stay on a software KVM such as Apollo / Artemis. This is not
-usbip and not a game plugin.
+with a Receiver **claims** a device from a dropdown and injects. Desktop
+video stays on a **software KVM** (Apollo / Artemis is one example). This
+is not usbip and not a game plugin.
 
 Site IPs, keys, and tokens belong in env vars or a local `ONBOARDING.md`
 (gitignored). This README is the public map: product, protocol, how to
@@ -18,13 +18,26 @@ are compatibility aliases until a dedicated hub cut.
 
 ## Why this exists
 
-Three ways to share a desk. They are not substitutes.
+Three planes share a desk. They are not substitutes.
 
 | Plane | What it is good at | What it does not do |
 |-------|--------------------|---------------------|
-| Hardware KVM | Direct electrical path. Wake a machine. No protocol in the middle. | Per-device claim. Hub-side drivers. A Receiver that is not the switched USB target. |
-| Apollo + Artemis | Software KVM for video and audio. | USB. You cannot claim a Magic Trackpad or a stick off that path. |
-| PortClaim | USB/HID software KVM. Claim fabric. Drivers live on the hub. Thin Receivers. | Raw USB pass-through. It is not a hardware KVM’s electrical wake path. |
+| Hardware KVM | A general electrical path. Wake a machine. No protocol in the middle. The switch does not care which keyboard layout you bought. | Per-device claim. Drivers on a host that is not the switched USB target. |
+| Software KVM | Desktop **video and audio** over the LAN, plus a mouse/keyboard path so a thin client can sit the session. Apollo + Artemis is one stack (Sunshine-class host, Shield / Android / other clients). | HID is whatever that **receiver hardware** already knows. Generic, predefined input. You cannot claim a Trackpad or a stick as a first-class device on that path. |
+| PortClaim | USB/HID **claim fabric**. Linux on the hub interprets the physical device. Compatibility is the hub, not the video client. Thin Receivers inject. | Raw USB pass-through. Not a hardware KVM wake path. Not the video plane. |
+
+Software KVM is good at the picture. It is a weak interpreter. Alt-Tab and
+other OS hotkeys often never leave the client because that box — in one
+common layout an NVIDIA Shield Pro running Artemis on Android — only
+forwards what *its* OS can capture. A Norwegian keyboard on that Shield
+does not become a Norwegian keyboard on the host; Android ate the keys.
+You still get “a keyboard,” just not yours.
+
+That is why PortClaim puts the interpreter on the dedicated USB hub (the
+X200 example), not on the video client. Linux HID on the hub decides
+what the device is. The Receiver is dumb inject. Apollo / Artemis can
+keep the desktop; they should not be asked to be a Magic Trackpad or a
+layout-accurate keyboard.
 
 Daily surface: open the Receiver, pick a device in the dropdown, Claim.
 Unclaimed devices stay silent. Switch the sink by claiming from another
@@ -45,10 +58,11 @@ Receiver.
 
 ### Origin
 
-Hardware KVM extenders often carry keyboard and mouse only. A stick, a
-trackpad, and a USB mic then have no path to the battlestation. PortClaim
-is that USB plane beside the video KVM. The product is the claim fabric,
-not a single joystick.
+Hardware KVM extenders often carry keyboard and mouse only, and software
+KVM (Apollo / Artemis as one example) adds video plus a generic input
+path. A stick, a trackpad, and a USB mic still have no honest path to
+the battlestation. PortClaim is that USB plane beside the video KVM.
+The product is the claim fabric, not a single joystick.
 
 ---
 
