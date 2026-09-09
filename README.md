@@ -119,6 +119,101 @@ $env:USB_LOOM_SELF = "DEST"
 
 ---
 
+## Network
+
+PortClaim is two boxes on a LAN, not a cloud service. Someone standing up
+their own instance needs **stable addresses** and a path in **both**
+directions. HTTP claim from the Receiver is not enough: after a claim,
+the hub **pushes UDP** at Dest.
+
+```mermaid
+flowchart LR
+  recv[Receiver_host]
+  hub[Hub]
+  recv -->|"TCP_27180_claim"| hub
+  hub -->|"UDP_27182_to_27185"| recv
+```
+
+### What to assign
+
+Give the hub and the Receiver **dedicated IPs** — static on the NIC, or
+DHCP reservations on the router. A lease that moves overnight breaks
+`USB_LOOM_HUB` and every claimed Dest.
+
+| Role | Address | Used for |
+|------|---------|----------|
+| Hub | `HUB` | Receiver opens `http://HUB:27180`. SSH for `install.sh`. |
+| Receiver | `DEST` | Hub sends SB10/AU10/TP10 to `DEST:2718x`. This is `USB_LOOM_SELF`. |
+
+`DEST` is the address **the hub uses to reach the Receiver**. Not
+`127.0.0.1`. Not a name the hub cannot resolve. Not the video-KVM
+client (Shield, etc.) unless that machine is actually running
+`PortClaim.exe`.
+
+Same L2/L3 network (or a route you control). Guest-isolation / client
+isolation Wi-Fi will black-hole UDP. Do not port-forward
+`:27180`–`:27185` to the internet.
+
+### Firewall
+
+Allow only between these two hosts:
+
+| Direction | Proto | Ports |
+|-----------|-------|-------|
+| Receiver → hub | TCP | `:27180` |
+| Hub → Receiver | UDP | `:27182` `:27183` `:27184` `:27185` |
+
+Windows Defender on the Receiver often blocks inbound UDP until you
+allow `PortClaim.exe` (or those ports). The hub listens on `0.0.0.0:27180`;
+lock that down at the host firewall if the LAN is not trusted.
+
+### Prove it before claiming
+
+From the Receiver host:
+
+```powershell
+ping HUB
+# after install.sh, with token:
+# GET http://HUB:27180/v1/health
+```
+
+From the hub: `ping DEST`. If ICMP is filtered, a UDP probe to `:27184`
+after the Receiver is running is the real test.
+
+Then set Dest in the PortClaim window (or `USB_LOOM_SELF`) to that same
+`DEST` and claim. Hub health is not the same as frames arriving.
+
+### Example LAN (replace with yours)
+
+Not a real site. One quiet `/24`, two reservations:
+
+```
+Router / gateway     192.168.0.1
+Hub (USB appliance)  192.168.0.10   static or reserved
+Receiver host        192.168.0.20   static or reserved
+```
+
+```powershell
+$env:USB_LOOM_HUB  = "http://192.168.0.10:27180"
+$env:USB_LOOM_SELF = "192.168.0.20"
+$env:USB_LOOM_TOKEN = "…"   # same value as /etc/usb-loom.env on the hub
+```
+
+```powershell
+python client\claim.py --hub http://192.168.0.10:27180 devices
+python client\claim.py --hub http://192.168.0.10:27180 claim magictrackpad --dest 192.168.0.20:27184
+```
+
+The X200 example is this pattern on ethernet: hub on a **static**
+wired address, Receiver on another reserved address on the same LAN,
+hub Wi-Fi left down. Overlay VPN (Tailscale / Teleport) is a later,
+untested way to make `HUB` / `DEST` overlay IPs instead — see Portable
+hub.
+
+Write your real numbers in local `ONBOARDING.md`, not in git.
+
+---
+
 ## Deploying a hub
 
 ### Requirements (any Linux USB host)
@@ -461,6 +556,7 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 | `deploy/cpu-quiet.sh` | Optional host CPU governor |
 | `deploy/fan-quiet.sh` | Optional thinkfan curve |
 | `deploy/usb-loom.env.example` | Empty token template |
+| Network | README: dedicated `HUB` / `DEST`, both-direction path |
 
 ---
 
