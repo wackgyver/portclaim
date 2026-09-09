@@ -324,6 +324,79 @@ sidecar that the title actually wants.
 
 ---
 
+## Adding a device
+
+For a human or an agent extending PortClaim. There is no plugin loader.
+A seamless add touches **hub capture, claim, wire, sink or sidecar, and
+a Receiver pane**. Settings exist only where inject-side knobs belong.
+
+The Receiver does not install vendor drivers. Linux on the hub interprets
+the USB device. The wire is a small LAN protocol. The Receiver (or a
+sidecar) injects.
+
+```mermaid
+flowchart LR
+  usb[Physical_USB]
+  hubCap[Hub_capture]
+  claim[HTTP_claim]
+  udp[UDP_proto]
+  inject[Sink_or_sidecar]
+  ui[Receiver_pane]
+  usb --> hubCap
+  hubCap --> claim
+  claim --> udp
+  udp --> inject
+  ui --> claim
+  ui --> inject
+```
+
+### Capture kinds (pick one)
+
+| Kind | Hub | Wire | Inject |
+|------|-----|------|--------|
+| HID stick / pad | `hub/hid.py` `Adapter` (`matches` + `to_state`), register in `ADAPTERS` | SB10 | Sidecar (SidestickBridge) or `xbox_sink` identity ViGEm |
+| Contacts / gestures | `hub/trackpad.py` (not an `Adapter`) | TP10 | GestureEngine in `trackpad_sink.py` |
+| PCM | `hub/audio.py` | AU10 | `mic_sink` → VB-CABLE |
+
+Today’s HID names: `ta320`, `xboxelite`, `generic`. `generic` is a
+fallback stick, not a license to skip `matches()`.
+
+A new *kind* (keyboard frames, usbip, …) needs a new `proto/` magic and
+a new UDP port in the `2718x` band. Do not overload TP10 / SB10 / AU10.
+
+### Checklist
+
+1. **Hub capture** — new `Adapter` or a dedicated hub module. `GET /v1/devices` must list it.
+2. **Claim** — `CLAIMABLE` in `hub/server.py`. Names in `ADAPTERS` are already claimable; `mic` and `magictrackpad` are extras. Start a stream thread if it is not HID.
+3. **Port** — `DEFAULT_PORTS` in `client/claim.py` and constants in `proto/` (see `proto/sb10.py`). One UDP port per data plane.
+4. **Udev** — vid/pid stay-powered + `SYSTEMD_WANTS=usb-loom-hub.service` in `deploy/99-usb-loom.rules`. `deploy/install.sh` must install any new `hub/*.py` / `proto/*.py`.
+5. **Sink or sidecar** — in-process in `receiver_app._ensure_sinks`, or an external mapper via env (`USB_LOOM_SIDESTICK`). Do not share one ViGEm window across two adapters.
+6. **Receiver pane** — `SUPPORTED` and `_build_*_pane` in `client/receiver_app.py`. Dest label from the Dest field. Copy states where mapping lives (this window vs sidecar).
+7. **Settings** — inject-side knobs only. `%LOCALAPPDATA%\portclaim\` with live reload (`trackpad.json` is the template). Hub stays dumb capture.
+8. **Tests** — if there is an engine, add tests beside `client/test_trackpad_gestures.py`.
+9. **Docs** — protocol block, Extending-a-claim table, this section. Freeze `PortClaim.exe` if client changed. Bounce the hub **only** when hub / proto / udev / `install.sh` changed.
+
+### Settings pane by use case
+
+The pane matches the job, not a generic form.
+
+| Shape | Example | What the pane does |
+|-------|---------|-------------------|
+| Gesture / pointer | Magic Trackpad | Sliders and clamps in PortClaim. Engine is on the Receiver. Contract lives in the gesture section below. |
+| Needs a game map | T.A320 | Claim + open sidecar. Do not duplicate SidestickBridge curves here. |
+| Identity pad | Xbox Elite | Claim + sink health. No second mapper. |
+| Audio | USB mic | Inject target, level, optional monitor. Not a DAW. |
+
+New devices pick one of those four.
+
+### Landmines
+
+- One owner per UDP port (`:27184` is the object lesson).
+- Do not bounce the hub for Receiver-only work.
+- Do not install Apple / Thrustmaster / Elite drivers on Windows for a device the hub already owns.
+
+---
+
 ## Gesture contract (Magic Trackpad `05AC:0265`)
 
 Client-side only. Hub `hub/trackpad.py` streams TP10. Engine:
@@ -368,9 +441,10 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 | Path | Role |
 |------|------|
 | `hub/server.py` | Claim/inventory HTTP |
-| `hub/hid.py` | T.A320 + Xbox Elite adapters |
+| `hub/hid.py` | T.A320 + Xbox Elite + `generic` HID adapters |
 | `hub/trackpad.py` | Magic Trackpad → TP10 @ 125 Hz |
 | `hub/audio.py` | Mic → AU10 |
+| Adding a device | This README section + those three hub modules |
 | `client/trackpad_sink.py` | GestureEngine (SendInput) |
 | `client/trackpad_config.py` | Settings load/save/clamp |
 | `client/test_trackpad_gestures.py` | Gesture unit tests |
