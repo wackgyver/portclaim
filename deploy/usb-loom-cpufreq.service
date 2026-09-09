@@ -1,0 +1,12 @@
+[Unit]
+Description=usb-loom acpi-cpufreq ondemand (PVE kernel defaults to performance)
+After=multi-user.target
+DefaultDependencies=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-loom-cpufreq
+
+[Install]
+WantedBy=multi-user.target

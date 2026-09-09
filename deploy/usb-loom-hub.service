@@ -1,0 +1,16 @@
+[Unit]
+Description=usb-loom hub (HID inventory + claim routes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/usb-loom.env
+ExecStart=/usr/local/sbin/usb-loom-hub
+Restart=always
+RestartSec=1
+Nice=-5
+SupplementaryGroups=input
+
+[Install]
+WantedBy=multi-user.target

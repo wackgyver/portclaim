@@ -1,0 +1,33 @@
+# Local desk — never publish
+ONBOARDING.md
+.ssh/
+*.pem
+*.key
+hub-token.txt
+user credentials x200.txt
+deploy/*.env
+!deploy/*.env.example
+.env
+*.env
+!*.env.example
+
+# Vaults (separate private repos)
+DAG-Vault/
+homelab-dag-vault/
+
+# Build / Python
+build/
+dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.obsidian/
+*.code-workspace
+.cursor/
+*Edit conflict*

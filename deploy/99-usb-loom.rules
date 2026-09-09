@@ -1,0 +1,21 @@
+# usb-loom: Ultrabase USB is first-class. Keep the dock hub and genesis
+# devices from autosuspending (EHCI split + Apple HID dies with error -32).
+
+# Every USB node on this appliance stays powered. This box is a USB fabric.
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/autosuspend", ATTR{power/autosuspend}="-1"
+
+# Lenovo ThinkPad X200 Ultrabase (42X4963) and anything hanging off it.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="17ef", ATTR{idProduct}=="1005", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", KERNEL=="1-5*", TEST=="power/control", ATTR{power/control}="on"
+
+# Genesis devices, whichever Ultrabase jack they land on.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="0265", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="044f", ATTR{idProduct}=="0406", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="31b2", ATTR{idProduct}=="0011", TEST=="power/control", ATTR{power/control}="on"
+
+ACTION=="add", SUBSYSTEM=="input", ATTRS{idVendor}=="044f", ATTRS{idProduct}=="0406", TAG+="systemd", ENV{SYSTEMD_WANTS}="usb-loom-hub.service"
+ACTION=="add", SUBSYSTEM=="input", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="0265", TAG+="systemd", ENV{SYSTEMD_WANTS}="usb-loom-hub.service"
+ACTION=="add", SUBSYSTEM=="sound", ATTRS{idVendor}=="31b2", ATTRS{idProduct}=="0011", TAG+="systemd", ENV{SYSTEMD_WANTS}="usb-loom-hub.service"
+ACTION=="add", SUBSYSTEM=="input", ATTRS{idVendor}=="045e", TAG+="systemd", ENV{SYSTEMD_WANTS}="usb-loom-hub.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="045e", TEST=="power/control", ATTR{power/control}="on"
