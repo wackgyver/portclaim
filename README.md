@@ -61,7 +61,7 @@ Receiver.
 Hardware KVM extenders often carry keyboard and mouse only, and software
 KVM (Apollo / Artemis as one example) adds video plus a generic input
 path. A stick, a trackpad, and a USB mic still have no honest path to
-the battlestation. PortClaim is that USB plane beside the video KVM.
+the receiver-side host. PortClaim is that USB plane beside the video KVM.
 The product is the claim fabric, not a single joystick.
 
 ---
@@ -124,7 +124,7 @@ $env:USB_LOOM_SELF = "DEST"
 ### Requirements (any Linux USB host)
 
 - A dedicated machine owns the physical USB ports. That is not the
-  battlestation.
+  receiver-side host.
 - Headless, always-on. USB ports stay powered. HID must not autosuspend.
 - LAN-first. Control HTTP `:27180`. This is a claim fabric, not usbip.
   Do not publish those ports on the public internet. Overlay VPN is how
@@ -214,7 +214,7 @@ flowchart LR
   away,” not a substitute for a tight LAN. Trackpad and stick feel the
   RTT; video still belongs on its own plane (Sunshine/Apollo, or the
   overlay’s own desktop path).
-- Bring the hub, not the battlestation: drivers stay on the laptop, the
+- Bring the hub, not the receiver-side host: drivers stay on the laptop, the
   Receiver elsewhere injects.
 
 Two different jobs. Do not mix them.
