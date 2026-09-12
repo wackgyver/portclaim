@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -25,6 +26,9 @@ def config_path() -> Path:
     override = os.environ.get("USB_LOOM_TP_CONFIG")
     if override:
         return Path(override)
+    if sys.platform != "win32":
+        xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        return Path(xdg) / "portclaim" / "trackpad.json"
     root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or "."
     new = Path(root) / "portclaim" / "trackpad.json"
     old = Path(root) / "usb-loom" / "trackpad.json"
@@ -41,7 +45,7 @@ def config_path() -> Path:
 class TrackpadConfig:
     tracking_speed: int = 5
     tap_to_click: bool = True
-    secondary: str = "off"  # retired: two-finger never clicks; scroll/flick only
+    secondary: str = "two-finger"  # physical two-finger click is right-click; tap still scrolls only
     click_drag: bool = False  # retired: one-finger never marks; three-finger only
     invert_x: bool = False
     invert_y: bool = False
@@ -135,7 +139,7 @@ def _clamp(cfg: TrackpadConfig) -> TrackpadConfig:
     cfg.invert_x = bool(cfg.invert_x)
     cfg.invert_y = bool(cfg.invert_y)
     cfg.click_drag = False
-    cfg.secondary = "off"
+    cfg.secondary = "two-finger"
     cfg.pinch_zoom = False
     cfg.three_finger_drag = True
     if cfg.swipe_pages not in SWIPE_PAGES_CHOICES:

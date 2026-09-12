@@ -1,5 +1,6 @@
 # Local desk — never publish
 ONBOARDING.md
+HANDOVER.omarchy.md
 .ssh/
 *.pem
 *.key

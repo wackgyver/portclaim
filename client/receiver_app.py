@@ -143,7 +143,11 @@ class ReceiverApp:
         box = self._group(pane, "T.A320 Copilot")
         ttk.Label(
             box,
-            text="Xbox mapping stays in SidestickBridge. This pane only claims the stick and opens that map.",
+            text=(
+                "SidestickBridge is Windows-only. This pane still claims ta320 on the hub. Map the stick on a Windows Receiver, or add a later uinput X360 sidecar."
+                if sys.platform != "win32"
+                else "Xbox mapping stays in SidestickBridge. This pane only claims the stick and opens that map."
+            ),
             style="Panel.TLabel",
             wraplength=680,
         ).pack(anchor="w", pady=4)
@@ -157,7 +161,7 @@ class ReceiverApp:
         box = self._group(pane, "Xbox Elite")
         ttk.Label(
             box,
-            text="Microsoft pad on the hub (xpad). This Receiver injects an identity ViGEm Xbox 360 controller on UDP :27185. SidestickBridge stays the T.A320 map — the Elite does not share that window.",
+            text="Microsoft pad on the hub (xpad). This Receiver injects an identity ViGEm Xbox 360 controller on UDP :27185. SidestickBridge stays the T.A320 map — the Elite does not share that window. Use an Ultrabase USB 2.0 jack (same hub as the condenser), not a USB 1.1 companion port.",
             style="Panel.TLabel",
             wraplength=680,
         ).pack(anchor="w", pady=4)
@@ -172,7 +176,11 @@ class ReceiverApp:
         box = self._group(pane, "USB microphone")
         ttk.Label(
             box,
-            text="The hub captures the USB condenser (AU10). This Receiver injects PCM into CABLE Input (VB-CABLE). Handy records CABLE Output — not Steam Streaming Microphone, and not a Bluetooth hands-free mic.",
+            text=(
+                "The hub captures the USB condenser (AU10). This Receiver injects PCM into PipeWire PortClaim Mic. Handy records portclaim_mic.monitor (or Default after the virtmic unit). Not a Bluetooth HFP pin, not the laptop built-in."
+                if sys.platform != "win32"
+                else "The hub captures the USB condenser (AU10). This Receiver injects PCM into CABLE Input (VB-CABLE). Handy records CABLE Output — not Steam Streaming Microphone, and not a Bluetooth hands-free mic."
+            ),
             style="Panel.TLabel",
             wraplength=680,
         ).pack(anchor="w", pady=4)
@@ -195,7 +203,11 @@ class ReceiverApp:
         ).pack(anchor="w", pady=6)
         ttk.Label(
             box,
-            text="Handy records CABLE Output (VB-Audio Virtual Cable). Hold Ctrl+Space for the whole sentence. Turn Handy VAD off for the first proof. Leave monitor off — speakers into that dock mic howl.",
+            text=(
+                "Handy (AUR) records portclaim_mic.monitor. Bind Hyprland to handy --toggle-transcription. VAD off for the first proof. Leave monitor off — speakers into that dock mic howl. If Handy only lists Default, the virtmic unit already set that source."
+                if sys.platform != "win32"
+                else "Handy records CABLE Output (VB-Audio Virtual Cable). Hold Ctrl+Space for the whole sentence. Turn Handy VAD off for the first proof. Leave monitor off — speakers into that dock mic howl."
+            ),
             style="Panel.TLabel",
             wraplength=680,
         ).pack(anchor="w", pady=8)
@@ -218,6 +230,7 @@ class ReceiverApp:
         self._slider(point, "Tracking speed", self.speed_var, self._on_speed)
         self.tap_var = tk.BooleanVar(value=self.cfg.tap_to_click)
         self._check(point, "Tap to click", self.tap_var, "tap_to_click")
+        ttk.Label(point, text="Secondary click  —  Two-finger click (right)", style="Panel.TLabel").pack(anchor="w", pady=2)
         self.invert_x_var = tk.BooleanVar(value=self.cfg.invert_x)
         self._check(point, "Invert horizontal axis", self.invert_x_var, "invert_x")
         self.invert_y_var = tk.BooleanVar(value=self.cfg.invert_y)
@@ -468,7 +481,15 @@ class ReceiverApp:
         else:
             print("TP10 :27184 already bound — this Receiver will not start a second sink", flush=True)
         if not claim._port_open(27185):
-            threading.Thread(target=xbox_sink.serve, args=(27185,), name="xb10-sink", daemon=True).start()
+            def _xbox() -> None:
+                try:
+                    xbox_sink.serve(27185)
+                except BaseException as exc:
+                    xbox_sink.STATS["error"] = str(exc) or type(exc).__name__
+                    xbox_sink.STATS["listening"] = False
+                    print(f"xbox_sink failed: {xbox_sink.STATS['error']}", flush=True)
+
+            threading.Thread(target=_xbox, name="xb10-sink", daemon=True).start()
 
     def _after_connect(self, msg: str) -> None:
         self._busy = False
@@ -499,6 +520,9 @@ class ReceiverApp:
         self._refresh_devices()
 
     def _open_sidestick(self) -> None:
+        if sys.platform != "win32":
+            self.status.configure(text="SidestickBridge is Windows-only.")
+            return
         claim._start_sidestick()
         if os.path.isfile(SIDESTICK):
             creation = getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -520,14 +544,20 @@ class ReceiverApp:
         au_dev = mic_sink.STATS.get("au10_device") or "-"
         au_rms = float(mic_sink.STATS.get("au10_rms") or 0.0)
         au_peak = float(mic_sink.STATS.get("au10_peak") or 0.0)
-        if au_last:
+        au_err = (mic_sink.STATS.get("error") or "").strip()
+        if au_err:
+            au = f"AU10 failed: {au_err}"
+        elif au_last:
             au = f"AU10 {time.time() - au_last:.1f}s ago  {au_pkts} frames"
         else:
             au = "AU10 idle"
         sb = "SB10 listening" if claim._port_open(27182) else "SB10 not listening"
         xb_last = xbox_sink.STATS.get("xb10_last") or 0.0
         xb_pkts = xbox_sink.STATS.get("xb10_packets") or 0
-        if xb_last:
+        xb_err = (xbox_sink.STATS.get("error") or "").strip()
+        if xb_err:
+            xb = f"XB10 failed: {xb_err}"
+        elif xb_last:
             xb = f"XB10 {time.time() - xb_last:.1f}s ago  {xb_pkts} frames"
         else:
             xb = "XB10 idle" if claim._port_open(27185) else "XB10 not listening"

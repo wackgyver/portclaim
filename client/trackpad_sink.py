@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Windows TP10 sink — Mac-like Magic Trackpad gestures via SendInput.
+"""TP10 sink — Mac-like Magic Trackpad gestures.
+
+Windows: SendInput. Linux / Omarchy: uinput virtual mouse + keys.
 
     python client/trackpad_sink.py --port 27184
 """
@@ -16,8 +18,17 @@ import struct
 import sys
 import time
 from collections import deque
-from ctypes import Structure, Union, c_void_p, sizeof, windll
-from ctypes import wintypes
+from ctypes import c_void_p
+
+if sys.platform == "win32":
+    from ctypes import Structure, Union, sizeof, windll
+    from ctypes import wintypes
+else:
+    Structure = object  # type: ignore[misc,assignment]
+    Union = object  # type: ignore[misc,assignment]
+    sizeof = None  # type: ignore[assignment]
+    windll = None  # type: ignore[assignment]
+    wintypes = None  # type: ignore[assignment]
 
 import trackpad_config
 
@@ -81,44 +92,58 @@ OLE_PARK = True
 _parked_drag: tuple[int, int] | None = None
 
 
-class MOUSEINPUT(Structure):
-    _fields_ = [
-        ("dx", wintypes.LONG),
-        ("dy", wintypes.LONG),
-        ("mouseData", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ULONG_PTR),
-    ]
+if sys.platform == "win32":
 
+    class MOUSEINPUT(Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
 
-class KEYBDINPUT(Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ULONG_PTR),
-    ]
+    class KEYBDINPUT(Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
 
+    class HARDWAREINPUT(Structure):
+        _fields_ = [
+            ("uMsg", wintypes.DWORD),
+            ("wParamL", wintypes.WORD),
+            ("wParamH", wintypes.WORD),
+        ]
 
-class HARDWAREINPUT(Structure):
-    _fields_ = [
-        ("uMsg", wintypes.DWORD),
-        ("wParamL", wintypes.WORD),
-        ("wParamH", wintypes.WORD),
-    ]
+    class INPUT_UNION(Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
 
+    class INPUT(Structure):
+        _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
-class INPUT_UNION(Union):
-    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+    user32 = windll.user32
+else:
+    INPUT = None  # type: ignore[misc,assignment]
+    user32 = None
 
-
-class INPUT(Structure):
-    _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
-
-
-user32 = windll.user32 if sys.platform == "win32" else None
+_linux_ui = None
+_LINUX_VK = {
+    VK_CONTROL: "KEY_LEFTCTRL",
+    VK_MENU: "KEY_LEFTALT",
+    VK_LEFT: "KEY_LEFT",
+    VK_UP: "KEY_UP",
+    VK_RIGHT: "KEY_RIGHT",
+    VK_DOWN: "KEY_DOWN",
+    VK_LWIN: "KEY_LEFTMETA",
+    VK_TAB: "KEY_TAB",
+    VK_N: "KEY_N",
+    VK_D: "KEY_D",
+}
 
 
 def decode_tp10(
@@ -147,8 +172,48 @@ def decode_tp10(
     return seq, buttons, contacts, rel
 
 
-def _send(inputs: list[INPUT]) -> None:
-    if user32 is None or not inputs:
+def _linux_uinput():
+    global _linux_ui
+    if _linux_ui is not None:
+        return _linux_ui
+    from evdev import UInput, ecodes
+
+    keys = [
+        ecodes.BTN_LEFT,
+        ecodes.BTN_RIGHT,
+        ecodes.BTN_MIDDLE,
+        ecodes.KEY_LEFTCTRL,
+        ecodes.KEY_LEFTALT,
+        ecodes.KEY_LEFTMETA,
+        ecodes.KEY_LEFT,
+        ecodes.KEY_RIGHT,
+        ecodes.KEY_UP,
+        ecodes.KEY_DOWN,
+        ecodes.KEY_TAB,
+        ecodes.KEY_N,
+        ecodes.KEY_D,
+    ]
+    _linux_ui = UInput(
+        {
+            ecodes.EV_KEY: keys,
+            ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL, ecodes.REL_HWHEEL],
+        },
+        name="PortClaim Trackpad",
+    )
+    return _linux_ui
+
+
+def _linux_key(vk: int):
+    from evdev import ecodes
+
+    name = _LINUX_VK.get(int(vk))
+    if not name:
+        return None
+    return getattr(ecodes, name)
+
+
+def _send(inputs: list) -> None:
+    if user32 is None or not inputs or INPUT is None:
         return
     arr = (INPUT * len(inputs))(*inputs)
     user32.SendInput(len(inputs), arr, sizeof(INPUT))
@@ -156,6 +221,16 @@ def _send(inputs: list[INPUT]) -> None:
 
 def mouse_move(dx: int, dy: int) -> None:
     if dx == 0 and dy == 0:
+        return
+    if sys.platform != "win32":
+        from evdev import ecodes
+
+        ui = _linux_uinput()
+        if dx:
+            ui.write(ecodes.EV_REL, ecodes.REL_X, int(dx))
+        if dy:
+            ui.write(ecodes.EV_REL, ecodes.REL_Y, int(dy))
+        ui.syn()
         return
     ev = INPUT()
     ev.type = INPUT_MOUSE
@@ -166,6 +241,21 @@ def mouse_move(dx: int, dy: int) -> None:
 
 
 def mouse_btn(flags: int) -> None:
+    if sys.platform != "win32":
+        from evdev import ecodes
+
+        ui = _linux_uinput()
+        mapping = (
+            (MOUSEEVENTF_LEFTDOWN, ecodes.BTN_LEFT, 1),
+            (MOUSEEVENTF_LEFTUP, ecodes.BTN_LEFT, 0),
+            (MOUSEEVENTF_RIGHTDOWN, ecodes.BTN_RIGHT, 1),
+            (MOUSEEVENTF_RIGHTUP, ecodes.BTN_RIGHT, 0),
+        )
+        for mask, code, value in mapping:
+            if flags & mask:
+                ui.write(ecodes.EV_KEY, code, value)
+        ui.syn()
+        return
     ev = INPUT()
     ev.type = INPUT_MOUSE
     ev.union.mi.dwFlags = flags
@@ -218,7 +308,18 @@ atexit.register(unpark_ole_drag)
 
 
 def mouse_wheel(vertical: int = 0, horizontal: int = 0) -> None:
-    evs: list[INPUT] = []
+    if sys.platform != "win32":
+        from evdev import ecodes
+
+        ui = _linux_uinput()
+        if vertical:
+            ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, int(vertical))
+        if horizontal:
+            ui.write(ecodes.EV_REL, ecodes.REL_HWHEEL, int(horizontal))
+        if vertical or horizontal:
+            ui.syn()
+        return
+    evs = []
     if vertical:
         ev = INPUT()
         ev.type = INPUT_MOUSE
@@ -235,6 +336,16 @@ def mouse_wheel(vertical: int = 0, horizontal: int = 0) -> None:
 
 
 def key_ctrl(down: bool) -> None:
+    if sys.platform != "win32":
+        from evdev import ecodes
+
+        code = _linux_key(VK_CONTROL)
+        if code is None:
+            return
+        ui = _linux_uinput()
+        ui.write(ecodes.EV_KEY, code, 1 if down else 0)
+        ui.syn()
+        return
     ev = INPUT()
     ev.type = INPUT_KEYBOARD
     ev.union.ki.wVk = VK_CONTROL
@@ -245,7 +356,18 @@ def key_ctrl(down: bool) -> None:
 def key_chord(vks: list[int]) -> None:
     if not vks:
         return
-    evs: list[INPUT] = []
+    if sys.platform != "win32":
+        from evdev import ecodes
+
+        ui = _linux_uinput()
+        codes = [c for c in (_linux_key(vk) for vk in vks) if c is not None]
+        for code in codes:
+            ui.write(ecodes.EV_KEY, code, 1)
+        for code in reversed(codes):
+            ui.write(ecodes.EV_KEY, code, 0)
+        ui.syn()
+        return
+    evs = []
     for vk in vks:
         ev = INPUT()
         ev.type = INPUT_KEYBOARD
@@ -588,6 +710,18 @@ class GestureEngine:
         mouse_btn(MOUSEEVENTF_LEFTDOWN)
         mouse_btn(MOUSEEVENTF_LEFTUP)
 
+    def _pulse_right(self) -> None:
+        mouse_btn(MOUSEEVENTF_RIGHTDOWN)
+        mouse_btn(MOUSEEVENTF_RIGHTUP)
+
+    def _maybe_secondary_click(self, n: int, clicked: bool) -> None:
+        if self.cfg.secondary != "two-finger" or n != 2 or not clicked:
+            return
+        if self.prev_clicked and self.prev_n == 2:
+            return
+        self._pulse_right()
+        self.armed_tap = 0
+
     def _arm_sticky(self, now: float) -> None:
         if self.mode == "drag3" and self.left_down:
             self.sticky = True
@@ -806,6 +940,7 @@ class GestureEngine:
                 self.mode = "scroll"
                 self.armed_tap = 0
                 self._ensure_left(False)
+                self._maybe_secondary_click(n, clicked)
             else:
                 self.mode = "drag3"
                 self.armed_tap = 0
@@ -868,6 +1003,7 @@ class GestureEngine:
                 self._mark_move(mdx, mdy, clock)
                 self._pointer_move(mdx, mdy)
         elif n == 2:
+            self._maybe_secondary_click(n, clicked)
             mdx, mdy = self._delta(contacts)
             self._mark_move(mdx, mdy, clock)
             self._flush_scroll(mdx, mdy)
@@ -889,15 +1025,20 @@ class GestureEngine:
 
 
 def serve(port: int) -> None:
-    if user32 is None:
-        raise SystemExit("trackpad_sink is Windows-only (SendInput)")
+    if sys.platform != "win32":
+        try:
+            _linux_uinput()
+        except Exception as exc:
+            raise SystemExit(f"trackpad_sink needs /dev/uinput (group input): {exc}") from exc
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind(("0.0.0.0", port))
     except OSError as exc:
         raise SystemExit(f"TP10 sink cannot bind UDP {port}: {exc}") from exc
-    log_path = os.environ.get("USB_LOOM_TP_LOG", os.path.join(os.environ.get("TEMP", "."), "usb-loom-tp10.log"))
-    print(f"TP10 sink listening UDP {port}  (Mac-like gestures, SendInput)", flush=True)
+    log_dir = os.environ.get("TEMP") or os.environ.get("TMPDIR") or "/tmp"
+    log_path = os.environ.get("USB_LOOM_TP_LOG", os.path.join(log_dir, "usb-loom-tp10.log"))
+    backend = "SendInput" if sys.platform == "win32" else "uinput"
+    print(f"TP10 sink listening UDP {port}  (Mac-like gestures, {backend})", flush=True)
     restore_ole_drag_defaults()
     engine = GestureEngine()
     packets = 0
@@ -937,7 +1078,7 @@ def serve(port: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="usb-loom Magic Trackpad sink (Windows)")
+    parser = argparse.ArgumentParser(description="usb-loom Magic Trackpad sink")
     parser.add_argument("--port", type=int, default=int(os.environ.get("USB_LOOM_TRACKPAD_PORT", 27184)))
     args = parser.parse_args(argv)
     serve(args.port)

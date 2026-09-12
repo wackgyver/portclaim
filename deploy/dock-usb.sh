@@ -28,22 +28,23 @@ for node in /sys/bus/usb/devices/*; do
   fi
 done
 
-# Runtime quirks for the next Magic Trackpad plug (builtin usbcore ignores modprobe.d).
+# Runtime quirks for the next Magic Trackpad / Elite plug (builtin usbcore ignores modprobe.d).
 # g=DELAY_INIT n=DELAY_CTRL_MSG k=NO_LPM j=IGNORE_REMOTE_WAKEUP
+USB_LOOM_QUIRKS='05ac:0265:gknj,045e:02e3:gknj'
 if [ -w /sys/module/usbcore/parameters/quirks ]; then
-  echo '05ac:0265:gknj' > /sys/module/usbcore/parameters/quirks || true
+  echo "$USB_LOOM_QUIRKS" > /sys/module/usbcore/parameters/quirks || true
 fi
 
 # Persist for the next boot (usbcore is built-in; modprobe.d is a fallback).
 mkdir -p /etc/modprobe.d /etc/default/grub.d
 cat > /etc/modprobe.d/usb-loom-usb.conf <<'EOF'
 # Applied only if usbcore is a module. PVE builds it in; see grub.d / kernel cmdline.
-options usbcore autosuspend=-1 old_scheme_first=1 quirks=05ac:0265:gknj
+options usbcore autosuspend=-1 old_scheme_first=1 quirks=05ac:0265:gknj,045e:02e3:gknj
 EOF
 
 cat > /etc/default/grub.d/usb-loom.cfg <<'EOF'
-# usb-loom: dock USB (Ultrabase EHCI hub) must not autosuspend Apple HID.
-GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT usbcore.autosuspend=-1 usbcore.old_scheme_first=1 usbcore.quirks=05ac:0265:gknj"
+# usb-loom: dock USB (Ultrabase EHCI hub) must not autosuspend Apple HID / Xbox Elite.
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT usbcore.autosuspend=-1 usbcore.old_scheme_first=1 usbcore.quirks=05ac:0265:gknj,045e:02e3:gknj"
 EOF
 
 if command -v update-grub >/dev/null 2>&1; then
@@ -52,7 +53,7 @@ fi
 
 # This host boots GRUB. grub.d/usb-loom.cfg is the persistent path.
 # If /etc/kernel/cmdline exists (some PVE installs), append the same tokens.
-USB_LOOM_CMDLINE="usbcore.autosuspend=-1 usbcore.old_scheme_first=1 usbcore.quirks=05ac:0265:gknj"
+USB_LOOM_CMDLINE="usbcore.autosuspend=-1 usbcore.old_scheme_first=1 usbcore.quirks=05ac:0265:gknj,045e:02e3:gknj"
 if [ -f /etc/kernel/cmdline ]; then
   line=$(tr '\n' ' ' </etc/kernel/cmdline)
   for tok in $USB_LOOM_CMDLINE; do
@@ -71,4 +72,4 @@ fi
 # HID reports 0x34/0x35. Do not enable bluetoothd on the BCM2045B.
 
 echo "usb-loom dock USB: Ultrabase powered, autosuspend off"
-lsusb | grep -E "17ef:1005|05ac:0265|044f:0406|31b2:0011" || true
+lsusb | grep -E "17ef:1005|05ac:0265|044f:0406|31b2:0011|045e:02e3" || true

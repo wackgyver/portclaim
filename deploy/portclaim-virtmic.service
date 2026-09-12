@@ -1,0 +1,12 @@
+[Unit]
+Description=PortClaim PipeWire virtual mic (Handy capture)
+After=pipewire-pulse.service pipewire.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.local/lib/portclaim/portclaim-virtmic.sh
+
+[Install]
+WantedBy=default.target

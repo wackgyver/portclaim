@@ -198,8 +198,18 @@ def stream_loop(adapter_name: str, hz: int, grab: bool) -> None:
             continue
         print(f"stream {adapter_name} {dev.path} -> {route['dest_host']}:{route['dest_port']}")
         if adapter_name == "xboxelite":
+            # xpad finishes GIP init after the node appears; reopen so we do not grab a dead fd.
             time.sleep(1.0)
-        if grab:
+            path = dev.path
+            dev.close()
+            dev = open_matching(adapter.matches)
+            if dev is None:
+                time.sleep(0.3)
+                continue
+            if dev.path != path:
+                print(f"xboxelite reopened {dev.path} (was {path})")
+        # Skip exclusive grab on xboxelite: Ultrabase TT resets made EVIOCGRAB return ENODEV.
+        if grab and adapter_name != "xboxelite":
             dev.grab(True)
         last = 0.0
         try:

@@ -1,0 +1,15 @@
+[Unit]
+Description=PortClaim Receiver
+After=portclaim-virtmic.service network-online.target
+Wants=portclaim-virtmic.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/portclaim/usb-loom.env
+WorkingDirectory=%h/.local/lib/portclaim/src
+ExecStart=/usr/bin/python client/receiver_app.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

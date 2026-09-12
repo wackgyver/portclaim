@@ -46,7 +46,16 @@ TARGET_RMS = 2500.0
 SILENCE_RMS = 80.0
 AGC_MAX = 8.0
 PROBE_SECONDS = 8
-PROBE_PATH = Path(os.environ.get("LOCALAPPDATA", ".")) / "portclaim" / "au10-probe.wav"
+def _probe_path() -> Path:
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA", ".")
+        return Path(root) / "portclaim" / "au10-probe.wav"
+    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(xdg) / "portclaim" / "au10-probe.wav"
+
+
+PROBE_PATH = _probe_path()
+LINUX_SINK = "portclaim_mic"
 
 STATS = {
     "au10_last": 0.0,
@@ -56,6 +65,7 @@ STATS = {
     "au10_peak": 0.0,
     "listening": False,
     "monitor": False,
+    "error": "",
 }
 MONITOR = {"enabled": False}
 
@@ -346,7 +356,135 @@ class WaveOut:
         winmm.waveOutClose(self.handle)
 
 
+class PulsePaplay:
+    """Play s16le mono into a Pulse/PipeWire sink (PortClaim Mic)."""
+
+    def __init__(self, sink: str, rate: int = INJECT_RATE) -> None:
+        import subprocess
+
+        self.proc = subprocess.Popen(
+            [
+                "paplay",
+                "--raw",
+                f"--rate={rate}",
+                "--channels=1",
+                "--format=s16le",
+                f"--device={sink}",
+            ],
+            stdin=subprocess.PIPE,
+        )
+        self.sink = sink
+        self.rate = rate
+
+    def write(self, pcm: bytes) -> None:
+        if not self.proc.stdin:
+            return
+        if self.proc.poll() is not None:
+            raise OSError(f"paplay exited {self.proc.returncode}")
+        self.proc.stdin.write(pcm)
+        self.proc.stdin.flush()
+
+    def close(self) -> None:
+        if self.proc.stdin:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+        try:
+            self.proc.terminate()
+        except OSError:
+            pass
+
+
+def _pulse_sinks() -> list[str]:
+    import subprocess
+
+    try:
+        out = subprocess.check_output(["pactl", "list", "short", "sinks"], text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            names.append(parts[1])
+    return names
+
+
+def pick_linux_sink(explicit: str) -> str:
+    names = _pulse_sinks()
+    want = (explicit or os.environ.get("USB_LOOM_MIC_DEVICE") or LINUX_SINK).strip()
+    if want in names:
+        return want
+    needle = want.lower()
+    for name in names:
+        if needle and needle in name.lower():
+            return name
+    if LINUX_SINK in names:
+        return LINUX_SINK
+    raise OSError(
+        "no PipeWire sink portclaim_mic — start portclaim-virtmic.service "
+        f"(have: {names or 'none'})"
+    )
+
+
+def _serve_linux(port: int, device_name: str, monitor: bool = False) -> None:
+    STATS["error"] = ""
+    STATS["listening"] = False
+    try:
+        sink = pick_linux_sink(device_name)
+        player = PulsePaplay(sink, INJECT_RATE)
+    except OSError as exc:
+        STATS["error"] = str(exc)
+        STATS["au10_device"] = ""
+        print(STATS["error"], flush=True)
+        return
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", port))
+    STATS["au10_device"] = sink
+    STATS["listening"] = True
+    MONITOR["enabled"] = monitor
+    STATS["monitor"] = monitor
+    print(f"AU10 sink listening UDP {port}  (PipeWire {sink})", flush=True)
+    if monitor:
+        print("monitor on — dock condenser into speakers howls", flush=True)
+    agc = Agc()
+    packets = 0
+    probe = ProbeWriter(PROBE_PATH)
+    try:
+        while True:
+            data, _addr = sock.recvfrom(65535)
+            decoded = decode_au10(data)
+            if decoded is None:
+                continue
+            _seq, pkt_rate, _pkt_ch, pcm = decoded
+            probe.push(pcm, pkt_rate)
+            shaped = agc.apply(pcm)
+            mono = resample_s16(shaped, pkt_rate, INJECT_RATE)
+            player.write(mono)
+            packets += 1
+            rms, peak = pcm_levels(pcm)
+            STATS["au10_last"] = time.time()
+            STATS["au10_packets"] = packets
+            STATS["au10_rms"] = rms
+            STATS["au10_peak"] = peak
+            if packets == 1 or packets % 50 == 0:
+                print(f"frames {packets}  inject=paplay:{sink}  rms={rms:.0f} peak={peak:.0f}", flush=True)
+    except KeyboardInterrupt:
+        print("stopped")
+    except OSError as exc:
+        STATS["error"] = str(exc)
+        print(f"AU10 linux inject failed: {exc}", flush=True)
+    finally:
+        STATS["listening"] = False
+        probe.flush()
+        player.close()
+
+
 def serve(port: int, device_name: str, monitor: bool = False) -> None:
+    if sys.platform != "win32":
+        _serve_linux(port, device_name, monitor)
+        return
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", port))
     print(f"AU10 sink listening UDP {port}", flush=True)
@@ -410,7 +548,7 @@ def serve(port: int, device_name: str, monitor: bool = False) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="usb-loom microphone sink (Windows)")
+    parser = argparse.ArgumentParser(description="usb-loom microphone sink")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--port", type=int, default=int(os.environ.get("USB_LOOM_AUDIO_PORT", 27183)))
     parser.add_argument("--device", default=os.environ.get("USB_LOOM_MIC_DEVICE", ""))
@@ -423,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.list:
+        if sys.platform != "win32":
+            print("PipeWire/Pulse sinks:")
+            for name in _pulse_sinks():
+                print(f"  {name}")
+            return 0
         print("waveOut (render):")
         for idx, name in list_wave_devices():
             print(f"{idx:3}  {name}")

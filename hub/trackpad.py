@@ -59,6 +59,34 @@ def open_trackpads() -> list[EvdevDevice]:
     return found
 
 
+def _close_trackpads(devs: list[EvdevDevice]) -> None:
+    for dev in devs:
+        try:
+            dev.close()
+        except OSError:
+            pass
+
+
+def wait_for_trackpads(ready: float = 3.0, want: int = 2) -> list[EvdevDevice]:
+    """hid-magicmouse publishes iface 0 first; iface 1 follows ~1s later.
+
+    Opening the first node and grabbing it is how Ultrabase plugs go silent
+    (empty TP10, error -32 on the sibling interface).
+    """
+    deadline = time.monotonic() + max(0.2, ready)
+    best: list[EvdevDevice] = []
+    while True:
+        found = open_trackpads()
+        if len(found) >= want:
+            _close_trackpads(best)
+            return found
+        _close_trackpads(best)
+        best = found
+        if time.monotonic() >= deadline:
+            return best
+        time.sleep(0.2)
+
+
 def merge_contacts(devs: list[EvdevDevice]) -> list[tuple[int, int, int, int, int, int, int]]:
     by_id: dict[int, tuple[int, int, int, int, int, int, int]] = {}
     for dev in devs:
@@ -143,7 +171,7 @@ def stream_trackpad(route_fn, adapter_name: str = ADAPTER, hz: int = 125, grab: 
         if route is None:
             time.sleep(0.2)
             continue
-        devs = open_trackpads()
+        devs = wait_for_trackpads()
         if not devs:
             now = time.monotonic()
             if now - miss_log >= 10.0:
@@ -153,10 +181,8 @@ def stream_trackpad(route_fn, adapter_name: str = ADAPTER, hz: int = 125, grab: 
             continue
         paths = ",".join(str(d.path) for d in devs)
         print(f"stream {adapter_name} {paths} -> {route['dest_host']}:{route['dest_port']}", flush=True)
-        # hid-magicmouse rewrites the battery descriptor and sends the MT
-        # feature report. EVIOCGRAB in that window drops the pad on a hub
-        # (Ultrabase / Ultra Dock) with error -32.
-        time.sleep(3.0)
+        # hid-magicmouse feature report + second iface must exist before grab.
+        # Grabbing the first node alone drops the Ultrabase pad with error -32.
         if grab:
             for dev in devs:
                 dev.grab(True)

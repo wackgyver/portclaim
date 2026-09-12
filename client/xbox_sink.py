@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows SB10 sink for xboxelite — identity ViGEm Xbox 360 pad.
+"""SB10 sink for xboxelite — identity Xbox 360 pad (ViGEm on Windows, uinput on Linux).
 
 Does not share SidestickBridge (that map is the T.A320).
 
@@ -18,7 +18,7 @@ import time
 MAGIC = 0x30314253
 HEADER = struct.Struct("<I I H H H H I I")
 
-STATS = {"xb10_last": 0.0, "xb10_packets": 0, "listening": False}
+STATS = {"xb10_last": 0.0, "xb10_packets": 0, "listening": False, "error": ""}
 
 # Linux xpad Y is inverted vs XInput.
 INVERT_Y = True
@@ -61,14 +61,31 @@ def pov_to_hat(pov: int) -> tuple[int, int]:
 
 
 def serve(port: int) -> None:
+    STATS["error"] = ""
+    STATS["listening"] = False
     try:
         import vgamepad as vg
     except ImportError:
-        raise SystemExit("xbox_sink needs vgamepad (pip install vgamepad) and ViGEmBus")
+        if sys.platform == "win32":
+            STATS["error"] = "vgamepad missing from this Receiver (rebuild with ViGEmClient.dll)"
+        else:
+            STATS["error"] = "vgamepad missing (pip install vgamepad; needs /dev/uinput)"
+        print(STATS["error"], flush=True)
+        return
 
-    pad = vg.VX360Gamepad()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", port))
+    try:
+        pad = vg.VX360Gamepad()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", port))
+    except OSError as exc:
+        STATS["error"] = f"ViGEm/uinput bind failed: {exc}"
+        print(STATS["error"], flush=True)
+        return
+    except Exception as exc:
+        STATS["error"] = str(exc) or type(exc).__name__
+        print(f"xbox_sink failed: {STATS['error']}", flush=True)
+        return
+
     STATS["listening"] = True
     print(f"xboxelite sink listening UDP {port}  (ViGEm identity Xbox 360)", flush=True)
     packets = 0

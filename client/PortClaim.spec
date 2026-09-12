@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Frozen PortClaim Receiver (windowed, no Python REPL)."""
 
-from PyInstaller.utils.hooks import collect_submodules
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 hidden = [
     "wasapi_out",
@@ -14,12 +16,32 @@ hidden = [
     "tkinter.ttk",
 ]
 hidden += collect_submodules("tkinter")
+hidden += collect_submodules("vgamepad")
+
+vg_datas, vg_binaries, vg_hidden = collect_all("vgamepad")
+hidden += vg_hidden
+
+
+def _not_msi(item) -> bool:
+    src = item[0] if isinstance(item, (list, tuple)) else item
+    return not str(src).lower().endswith(".msi")
+
+
+vg_datas = [item for item in vg_datas if _not_msi(item)]
+vg_binaries = [item for item in vg_binaries if _not_msi(item)]
+
+import vgamepad
+
+_dll = Path(vgamepad.__file__).parent / "win" / "vigem" / "client" / "x64" / "ViGEmClient.dll"
+_dll_dest = "vgamepad/win/vigem/client/x64"
+if _dll.is_file() and not any(str(item[1]).replace("\\", "/") == _dll_dest for item in vg_binaries):
+    vg_binaries.append((str(_dll), _dll_dest))
 
 a = Analysis(
     ["receiver_app.py"],
     pathex=["."],
-    binaries=[],
-    datas=[],
+    binaries=vg_binaries,
+    datas=vg_datas,
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

@@ -19,6 +19,7 @@ from trackpad_sink import (
     MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP,
     coast_decay_for_speed,
     coast_step,
 )
@@ -490,14 +491,26 @@ class StickyDragTests(unittest.TestCase):
         self.assertNotIn(MOUSEEVENTF_LEFTDOWN, self.btns)
         self.assertFalse(self.engine.left_down)
 
-    def test_two_finger_physical_click_does_not_press(self) -> None:
+    def test_two_finger_physical_click_is_right(self) -> None:
         pair = [_c(0, 100, 200), _c(1, 120, 200)]
         self._feed(pair, 1.0, buttons=1)
         self._feed([_c(0, 100, 212), _c(1, 120, 212)], 1.02, buttons=1)
         self._feed([], 1.04, buttons=1)
-        self.assertNotIn(MOUSEEVENTF_RIGHTDOWN, self.btns)
+        self.assertEqual(self.btns.count(MOUSEEVENTF_RIGHTDOWN), 1)
+        self.assertEqual(self.btns.count(MOUSEEVENTF_RIGHTUP), 1)
         self.assertNotIn(MOUSEEVENTF_LEFTDOWN, self.btns)
         self.assertFalse(self.engine.left_down)
+        self.assertEqual(self.engine.mode, "")
+
+    def test_two_finger_click_while_scrolling_is_right(self) -> None:
+        pair = [_c(0, 100, 200), _c(1, 120, 200)]
+        self._feed(pair, 1.0)
+        self._feed([_c(0, 100, 220), _c(1, 120, 220)], 1.02)
+        self.assertEqual(self.engine.mode, "scroll")
+        self._feed([_c(0, 100, 230), _c(1, 120, 230)], 1.04, buttons=1)
+        self.assertEqual(self.btns.count(MOUSEEVENTF_RIGHTDOWN), 1)
+        self.assertEqual(self.engine.mode, "scroll")
+        self.assertNotIn(MOUSEEVENTF_LEFTDOWN, self.btns)
 
     def test_tap_survives_one_frame_second_finger(self) -> None:
         self._feed([_c(0, 100, 200)], 1.0)
@@ -603,6 +616,10 @@ class ConfigClampTests(unittest.TestCase):
     def test_clamp_forces_pinch_zoom_off(self) -> None:
         cfg = trackpad_config._clamp(trackpad_config.TrackpadConfig(pinch_zoom=True))
         self.assertFalse(cfg.pinch_zoom)
+
+    def test_clamp_forces_two_finger_secondary(self) -> None:
+        cfg = trackpad_config._clamp(trackpad_config.TrackpadConfig(secondary="off"))
+        self.assertEqual(cfg.secondary, "two-finger")
 
     def test_clamp_forces_three_finger_drag_on(self) -> None:
         cfg = trackpad_config._clamp(trackpad_config.TrackpadConfig(three_finger_drag=False))

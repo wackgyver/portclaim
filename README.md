@@ -54,8 +54,8 @@ drivers.
 
 The hub does not recognize gestures. `hub/trackpad.py` streams contacts.
 GestureEngine / ViGEm / VB-CABLE on the claimed sink speak the local OS
-(SendInput on Windows). Capture and drivers on the hub; inject on the
-Receiver.
+(SendInput on Windows; uinput + PipeWire on Linux). Capture and drivers
+on the hub; inject on the Receiver.
 
 ### Origin
 
@@ -79,8 +79,8 @@ Hub  (systemd usb-loom-hub)
 
 Receiver sinks
   Sidestick / ViGEm map   :27182  → Xbox 360 (T.A320)
-  mic_sink                :27183  → CABLE Input (VB-CABLE)
-  GestureEngine           :27184  → SendInput (inside frozen Receiver)
+  mic_sink                :27183  → CABLE Input (Windows) / portclaim_mic (Linux)
+  GestureEngine           :27184  → SendInput or uinput
   xbox_sink               :27185  → identity ViGEm Xbox 360
   PortClaim.exe           mapping UI; owns :27184 when healthy
 ```
@@ -109,7 +109,11 @@ On the hub node, `deploy/install.sh --token …` writes `/etc/usb-loom.env`.
 Copy `deploy/usb-loom.env.example`; never commit a filled `.env`.
 
 A working kit may keep a local `ONBOARDING.md` (gitignored) for IPs and
-keys. Do not copy that file into git.
+keys. Do not copy that file into git. Linux / Omarchy Receivers fill
+`~/.config/portclaim/usb-loom.env` from
+`deploy/usb-loom-receiver.env.example` and the blanks in
+`deploy/HANDOVER.omarchy.example.md` (copy to gitignored
+`HANDOVER.omarchy.md`).
 
 ```powershell
 # Receiver / claim.py — fill with your LAN, not placeholders
@@ -381,6 +385,43 @@ python -m unittest test_trackpad_gestures
 
 from `client/`.
 
+### Receiver on Linux (Omarchy)
+
+Omarchy (Arch + Hyprland) is a **Receiver only**. The hub stays on the
+USB appliance. Clone the public tree and run the Arch installer — this
+is not an official Omarchy package.
+
+```bash
+git clone https://github.com/wackgyver/portclaim.git
+cd portclaim
+./deploy/install-receiver.sh
+# fill ~/.config/portclaim/usb-loom.env from deploy/HANDOVER.omarchy.example.md
+systemctl --user enable --now portclaim
+```
+
+`install-receiver.sh` puts you in group `input` (`/dev/uinput`), loads a
+PipeWire null sink **PortClaim Mic**, and can point you at AUR `handy`
+(`yay -S handy` or `omarchy-pkg-aur-install handy`; `handy-bin` if the
+source build hurts).
+
+| Adapter | Linux inject |
+|---------|--------------|
+| `magictrackpad` | GestureEngine → uinput mouse |
+| `xboxelite` | vgamepad → uinput Xbox 360 |
+| `mic` | AU10 → `portclaim_mic`; Handy records `portclaim_mic.monitor` |
+| `ta320` | Claim only. SidestickBridge stays Windows. |
+
+Handy on Linux often lists only **Default**. The virtmic unit sets the
+default source to `portclaim_mic.monitor`. Bind Hyprland to
+`handy --toggle-transcription` (do not rely on in-app Ctrl+Space). VAD
+off for the first proof. Leave the Receiver speaker monitor off.
+
+If Handy cannot hear the monitor, use a dictation app that can pick a
+Pulse source (`nerd-dictation`). Same virtual cable; the hub does not
+change.
+
+Trackpad settings: `~/.config/portclaim/trackpad.json`.
+
 ---
 
 ## Extending a claim
@@ -394,8 +435,8 @@ host → what the OS or game sees.
 | Adapter | On-wire | Sidecar example | What the OS sees |
 |---------|---------|-----------------|------------------|
 | `ta320` | SB10 `:27182` | SidestickBridge → ViGEm Xbox 360 | Gamepad (not raw Thrustmaster HID) |
-| `magictrackpad` | TP10 `:27184` | GestureEngine inside PortClaim | SendInput pointer / scroll / mark |
-| `mic` | AU10 `:27183` | `mic_sink` → VB-CABLE | CABLE Output for Handy / Discord |
+| `magictrackpad` | TP10 `:27184` | GestureEngine inside PortClaim | SendInput or uinput pointer / scroll / mark |
+| `mic` | AU10 `:27183` | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` | Handy records CABLE Output / `portclaim_mic.monitor` |
 | `xboxelite` | SB10 `:27185` | `xbox_sink` identity ViGEm | Xbox 360 pad (not SidestickBridge) |
 
 ### Example — T.A320 + SidestickBridge + Starfield
@@ -452,7 +493,7 @@ flowchart LR
 |------|-----|------|--------|
 | HID stick / pad | `hub/hid.py` `Adapter` (`matches` + `to_state`), register in `ADAPTERS` | SB10 | Sidecar (SidestickBridge) or `xbox_sink` identity ViGEm |
 | Contacts / gestures | `hub/trackpad.py` (not an `Adapter`) | TP10 | GestureEngine in `trackpad_sink.py` |
-| PCM | `hub/audio.py` | AU10 | `mic_sink` → VB-CABLE |
+| PCM | `hub/audio.py` | AU10 | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` |
 
 Today’s HID names: `ta320`, `xboxelite`, `generic`. `generic` is a
 fallback stick, not a license to skip `matches()`.
@@ -502,13 +543,13 @@ sink host. Tests: `client/test_trackpad_gestures.py`.
 | Fingers | Does | Does not |
 |---------|------|----------|
 | One | Pointer + click (tap or physical pulse) | Drag-to-select, sticky mark, click-drag |
-| Two | Scroll + flick coast | Click, right-click, mark, pinch zoom |
+| Two | Scroll + flick coast, physical click = right-click | Tap-click, mark, pinch zoom |
 | Three | Sticky mark (left-down + move), 3→2/4/1 flicker keeps the mark | Swipe, back/forward |
 
 Hard rules (forced in config clamp, not checkboxes):
 
 - `click_drag = False` — one finger never holds left for OLE/select.
-- `secondary = "off"` — two-finger tap/click never emits mouse buttons.
+- `secondary = "two-finger"` — physical two-finger click is a right-click. Two-finger tap still does not click; motion stays scroll/flick.
 - `pinch_zoom = False` — two-finger never holds Ctrl or zooms; use Ctrl+/Ctrl-.
 - `three_finger_drag = True` — three contacts are a sticky click. No 3-finger swipe.
   After a mark, a one-finger move ends the mark and goes back to pointer. A short
@@ -541,11 +582,11 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 | `hub/trackpad.py` | Magic Trackpad → TP10 @ 125 Hz |
 | `hub/audio.py` | Mic → AU10 |
 | Adding a device | This README section + those three hub modules |
-| `client/trackpad_sink.py` | GestureEngine (SendInput) |
+| `client/trackpad_sink.py` | GestureEngine (SendInput / uinput) |
 | `client/trackpad_config.py` | Settings load/save/clamp |
 | `client/test_trackpad_gestures.py` | Gesture unit tests |
 | `client/receiver_app.py` | Mapping window; starts sinks if ports free |
-| `client/mic_sink.py` | AU10 → VB-CABLE |
+| `client/mic_sink.py` | AU10 → VB-CABLE or PipeWire `portclaim_mic` |
 | `client/xbox_sink.py` | XB10 → ViGEm identity pad |
 | `client/claim.py` | `devices` / `claim` / `release` / `connect` |
 | `proto/` | SB10, AU10, TP10, XB10 constants |

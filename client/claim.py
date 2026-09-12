@@ -31,6 +31,32 @@ DEFAULT_PORTS = {
 }
 
 
+def _load_receiver_env() -> None:
+    if sys.platform == "win32":
+        return
+    from pathlib import Path
+
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    path = Path(xdg) / "portclaim" / "usb-loom.env"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
+_load_receiver_env()
+
+
 def _token() -> str:
     return os.environ.get("USB_LOOM_TOKEN", "").strip()
 
@@ -148,6 +174,14 @@ def _start_sidestick() -> None:
 def _start_xbox_sink() -> None:
     if _port_open(27185):
         print("xboxelite sink already listening on :27185")
+        return
+    if getattr(sys, "frozen", False):
+        import threading
+
+        import xbox_sink
+
+        threading.Thread(target=xbox_sink.serve, args=(27185,), name="xb10-sink", daemon=True).start()
+        print("starting xboxelite ViGEm sink on :27185 (in-process)")
         return
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "xbox_sink.py")
