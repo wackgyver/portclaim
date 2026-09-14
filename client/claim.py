@@ -127,7 +127,9 @@ def _register_and_claim(hub: str, client_id: str, adapter: str, dest: str) -> di
         hub,
         "POST",
         f"/v1/devices/{adapter}/claim",
-        {"client_id": client_id, "dest": dest},
+        {"client_id": client_id, "dest": dest,
+         **({"native_touchpad": sys.platform != "win32" and os.environ.get("USB_LOOM_TP_BACKEND", "native") == "native"}
+            if adapter == "magictrackpad" else {})},
     )
 
 

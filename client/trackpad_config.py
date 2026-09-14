@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -121,23 +122,33 @@ def _clamp_idle(ms: int) -> int:
     return max(150, min(2500, int(ms)))
 
 
+def _safe_int(value, default, low=0, high=10):
+    try:
+        return max(low, min(high, int(value))) if type(value) is not bool else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _safe_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return default
+
+
 def _clamp(cfg: TrackpadConfig) -> TrackpadConfig:
-    cfg.tracking_speed = max(0, min(10, int(cfg.tracking_speed)))
-    cfg.scroll_speed = max(0, min(10, int(cfg.scroll_speed)))
-    try:
-        cfg.flick_force = max(0, min(10, int(cfg.flick_force)))
-    except (TypeError, ValueError):
-        cfg.flick_force = 5
-    try:
-        cfg.flick_friction = max(0, min(10, int(cfg.flick_friction)))
-    except (TypeError, ValueError):
-        cfg.flick_friction = 5
-    try:
-        cfg.drag_idle_ms = _clamp_idle(int(cfg.drag_idle_ms))
-    except (TypeError, ValueError):
-        cfg.drag_idle_ms = 350
-    cfg.invert_x = bool(cfg.invert_x)
-    cfg.invert_y = bool(cfg.invert_y)
+    cfg.tracking_speed = _safe_int(cfg.tracking_speed, 5)
+    cfg.scroll_speed = _safe_int(cfg.scroll_speed, 5)
+    cfg.flick_force = _safe_int(cfg.flick_force, 5)
+    cfg.flick_friction = _safe_int(cfg.flick_friction, 5)
+    cfg.drag_idle_ms = _safe_int(cfg.drag_idle_ms, 350, 150, 2500)
+    cfg.invert_x = _safe_bool(cfg.invert_x, False)
+    cfg.invert_y = _safe_bool(cfg.invert_y, False)
+    cfg.tap_to_click = _safe_bool(cfg.tap_to_click, True)
+    cfg.natural_scroll = _safe_bool(cfg.natural_scroll, True)
     cfg.click_drag = False
     cfg.secondary = "two-finger"
     cfg.pinch_zoom = False
@@ -176,7 +187,17 @@ def save(cfg: TrackpadConfig, path: Path | None = None) -> Path:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     clean = _clamp(cfg)
-    target.write_text(json.dumps(asdict(clean), indent=2) + "\n", encoding="utf-8")
+    text = json.dumps(asdict(clean), indent=2, allow_nan=False) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         prefix=".trackpad-", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 

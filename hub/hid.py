@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import array
+import errno
 import os
 import selectors
 import socket
@@ -35,6 +36,7 @@ EV_KEY = 0x01
 EV_REL = 0x02
 EV_ABS = 0x03
 SYN_REPORT = 0
+SYN_DROPPED = 3
 REL_X, REL_Y, REL_WHEEL, REL_HWHEEL = 0x00, 0x01, 0x08, 0x06
 
 ABS_X, ABS_Y, ABS_Z = 0x00, 0x01, 0x02
@@ -108,6 +110,9 @@ class AbsAxis:
     value: int
     minimum: int
     maximum: int
+    resolution: int = 0
+    fuzz: int = 0
+    flat: int = 0
 
     def scaled_u16(self) -> int:
         span = self.maximum - self.minimum
@@ -164,11 +169,22 @@ class EvdevDevice:
         self.path = path
         self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         self.grabbed = False
-        self.id = self._read_id()
-        self.name = self._read_name()
-        self.abs: dict[int, AbsAxis] = {}
-        self.keys: list[int] = []
-        self._load_caps()
+        try:
+            self.id = self._read_id()
+            self.name = self._read_name()
+            self.abs: dict[int, AbsAxis] = {}
+            self.keys: list[int] = []
+            self._load_caps()
+        except BaseException:
+            os.close(self.fd)
+            raise
+        self._dropped = False
+        self._monotonic_events = False
+        try:
+            fcntl.ioctl(self.fd, _iow("E", 0xA0, 4), struct.pack("i", time.CLOCK_MONOTONIC))
+            self._monotonic_events = True
+        except OSError:
+            pass
         self.hat_x = 0
         self.hat_y = 0
         self.key_down: set[int] = set()
@@ -217,8 +233,8 @@ class EvdevDevice:
                 fcntl.ioctl(self.fd, eviocgabs(code), raw, True)
             except OSError:
                 continue
-            value, minimum, maximum, _fuzz, _flat, _res = struct.unpack("iiiiii", raw)
-            self.abs[code] = AbsAxis(code, value, minimum, maximum)
+            value, minimum, maximum, fuzz, flat, resolution = struct.unpack("iiiiii", raw)
+            self.abs[code] = AbsAxis(code, value, minimum, maximum, resolution, fuzz, flat)
         key_bytes = (KEY_MAX + 7) // 8
         self.keys = [c for c in self._bits(EV_KEY, key_bytes) if c >= BTN_MISC]
 
@@ -237,19 +253,61 @@ class EvdevDevice:
                 pass
         os.close(self.fd)
 
-    def pump(self) -> bool:
+    def sync_state(self) -> None:
+        """Rebuild state after SYN_DROPPED or initial open; never trust lost deltas."""
+        bits = self._ioctl_in(_ior("E", 0x18, (KEY_MAX + 8) // 8), (KEY_MAX + 8) // 8)
+        self.key_down = {code for code in range(KEY_MAX + 1) if bits[code // 8] & (1 << (code % 8))}
+        for code, axis in self.abs.items():
+            axis.value = struct.unpack("iiiiii", self._ioctl_in(eviocgabs(code), 24))[0]
+        self.hat_x = self.abs[ABS_HAT0X].value if ABS_HAT0X in self.abs else 0
+        self.hat_y = self.abs[ABS_HAT0Y].value if ABS_HAT0Y in self.abs else 0
+        self.mt_slots.clear()
+        if ABS_MT_SLOT in self.abs:
+            count = self.abs[ABS_MT_SLOT].maximum + 1
+            if not 1 <= count <= 64:
+                raise OSError("unsupported MT slot count")
+            values = {}
+            for code in self.abs:
+                if ABS_MT_SLOT < code <= ABS_MT_PRESSURE:
+                    buf = array.array("i", [code] + [0] * count)
+                    fcntl.ioctl(self.fd, _ior("E", 0x0A, len(buf) * 4), buf, True)
+                    values[code] = list(buf[1:])
+            for slot, tid in enumerate(values.get(ABS_MT_TRACKING_ID, [])):
+                if tid >= 0:
+                    self.mt_slots[slot] = {code: data[slot] for code, data in values.items()}
+            self.mt_slot = self.abs[ABS_MT_SLOT].value
+        self.rel_x = self.rel_y = self.rel_wheel = self.rel_hwheel = 0
+
+    def pump(self, on_frame=None) -> bool:
+        """Drain bounded reads; optional callback observes EVERY complete report.
+
+        on_frame(device, monotonic_us, discontinuity) must consume state now.
+        Snapshot-only joystick callers retain their original API.
+        """
         changed = False
-        while True:
+        for _batch in range(32):
             try:
-                chunk = os.read(self.fd, EVENT_SIZE * 32)
+                chunk = os.read(self.fd, EVENT_SIZE * 64)
             except BlockingIOError:
                 break
             if not chunk:
-                break
+                raise OSError(errno.ENODEV, "evdev device closed")
             for offset in range(0, len(chunk) // EVENT_SIZE * EVENT_SIZE, EVENT_SIZE):
-                _s, _us, ev_type, code, value = struct.unpack(
+                seconds, micros, ev_type, code, value = struct.unpack(
                     EVENT_FORMAT, chunk[offset : offset + EVENT_SIZE]
                 )
+                if ev_type == EV_SYN and code == SYN_DROPPED:
+                    self._dropped = True
+                    continue
+                if self._dropped:
+                    if ev_type != EV_SYN or code != SYN_REPORT:
+                        continue
+                    self.sync_state()
+                    self._dropped = False
+                    changed = True
+                    if on_frame is not None:
+                        on_frame(self, time.monotonic_ns() // 1000, True)
+                    continue
                 if ev_type == EV_ABS and code in self.abs:
                     self.abs[code].value = value
                     if code == ABS_HAT0X:
@@ -283,6 +341,9 @@ class EvdevDevice:
                     changed = True
                 elif ev_type == EV_SYN and code == SYN_REPORT:
                     changed = True
+                    if on_frame is not None:
+                        stamp = seconds * 1000000 + micros if self._monotonic_events else time.monotonic_ns() // 1000
+                        on_frame(self, stamp, False)
         return changed
 
     def take_rel(self) -> tuple[int, int, int, int]:

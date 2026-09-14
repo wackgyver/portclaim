@@ -53,9 +53,11 @@ AU10 PCM). The Receiver never installs Apple, Thrustmaster, or Elite
 drivers.
 
 The hub does not recognize gestures. `hub/trackpad.py` streams contacts.
-GestureEngine / ViGEm / VB-CABLE on the claimed sink speak the local OS
-(SendInput on Windows; uinput + PipeWire on Linux). Capture and drivers
-on the hub; inject on the Receiver.
+Windows uses GestureEngine / ViGEm / VB-CABLE. Linux forwards lossless
+contacts into a native uinput touchpad so libinput and Wayland handle input;
+its gamepad uses uinput and its microphone uses PipeWire. Capture and drivers
+on the hub; OS interpretation and injection on the Receiver.
+See [Native Linux touchpad](docs/native-touchpad.md) for the protocol and upgrade.
 
 ### Origin
 
@@ -74,19 +76,22 @@ Hub  (systemd usb-loom-hub)
   HTTP control            :27180
   SB10 ta320              UDP → claimed dest (default :27182)
   AU10 mic                UDP → claimed dest (default :27183)
-  TP10 magictrackpad      UDP → claimed dest (default :27184)  125 Hz incl. empty frames
+  TP10/N1 magictrackpad   UDP → claimed dest (default :27184)  physical reports + heartbeat
   SB10 xboxelite          UDP → claimed dest (default :27185)
 
 Receiver sinks
   Sidestick / ViGEm map   :27182  → Xbox 360 (T.A320)
   mic_sink                :27183  → CABLE Input (Windows) / portclaim_mic (Linux)
-  GestureEngine           :27184  → SendInput or uinput
+  Trackpad                :27184  → native Linux touchpad / Windows GestureEngine
   xbox_sink               :27185  → identity ViGEm Xbox 360
   PortClaim.exe           mapping UI; owns :27184 when healthy
 ```
 
-Health: `GET /v1/health`. Inventory: `GET /v1/devices`. Auth: header
-`X-Usb-Loom-Token` (see Site config).
+Health: `GET /v1/health`. Inventory: `GET /v1/devices`. Native touchpad geometry:
+`GET /v1/devices/magictrackpad/descriptor`. Auth: header `X-Usb-Loom-Token`
+(see Site config). Native trackpad claims set `native_touchpad: true` for a
+100 ms idle heartbeat; legacy claims retain 125 Hz empty frames. Actual contact
+reports are forwarded immediately at each evdev report boundary.
 
 Adapters: `ta320` `:27182`, `magictrackpad` `:27184`, `mic` `:27183`,
 `xboxelite` `:27185`.
@@ -353,6 +358,13 @@ into PVE.
 
 ## Receiver
 
+One hub and shared wire protocols, with OS-specific receiver behavior and
+packaging. See the [platform-separation proposal](docs/platform-separation.md)
+for module boundaries, independent Windows/Linux CI, and separate release assets.
+It is a proposal, not an already completed directory refactor or Windows release.
+
+### Receiver on Windows
+
 Windows mapping surface. Freeze with `deploy/Build-Receiver.ps1`:
 
 `%LOCALAPPDATA%\portclaim\Receiver\PortClaim.exe`
@@ -388,8 +400,15 @@ from `client/`.
 ### Receiver on Linux (Omarchy)
 
 Omarchy (Arch + Hyprland) is a **Receiver only**. The hub stays on the
-USB appliance. Clone the public tree and run the Arch installer — this
-is not an official Omarchy package.
+USB appliance. This is not an official Omarchy package.
+
+**Packaging caveat:** the checked-in Arch installer is the older bootstrap,
+not the hardened tray/service setup. It grants `input` group membership, changes
+the default microphone, enables a microphone service, and installs an automatic
+receiver restart policy. It does not install the optional tray dependencies or
+single-instance launcher. Do not rerun it over a working configured installation.
+See [the packaging gap and proposed migration](docs/platform-separation.md#known-linux-packaging-gap).
+The existing bootstrap below is for a new host only, after reviewing those effects.
 
 ```bash
 git clone https://github.com/wackgyver/portclaim.git
@@ -406,9 +425,9 @@ source build hurts).
 
 | Adapter | Linux inject |
 |---------|--------------|
-| `magictrackpad` | GestureEngine → uinput mouse |
-| `xboxelite` | vgamepad → uinput Xbox 360 |
-| `mic` | AU10 → `portclaim_mic`; Handy records `portclaim_mic.monitor` |
+| `magictrackpad` | TP10/N1 → native uinput touchpad → libinput/Wayland |
+| `xboxelite` | vgamepad → uinput Xbox 360; writes changed states only |
+| `mic` | Native-rate AU10 → PipeWire `portclaim_mic`; Handy records `portclaim_mic.monitor` |
 | `ta320` | Claim only. SidestickBridge stays Windows. |
 
 Handy on Linux often lists only **Default**. The virtmic unit sets the
@@ -420,7 +439,15 @@ If Handy cannot hear the monitor, use a dictation app that can pick a
 Pulse source (`nerd-dictation`). Same virtual cable; the hub does not
 change.
 
-Trackpad settings: `~/.config/portclaim/trackpad.json`.
+**Native trackpad upgrade:** deploy the hub's TP10/N1 extension and descriptor API
+before switching Linux receivers. See [the native guide](docs/native-touchpad.md)
+for the device-specific Hyprland profile, tests, and rollback. Native settings
+belong to libinput/the compositor, not the old mapping sliders. Explicit fallback:
+`USB_LOOM_TP_BACKEND=legacy`, with `~/.config/portclaim/trackpad.json`.
+
+The Linux audio sink passes the source sample rate to PipeWire rather than
+resampling each packet in Python. Xbox injection ignores duplicate state updates
+and neutralizes held input when the stream goes stale.
 
 ---
 
@@ -435,7 +462,7 @@ host → what the OS or game sees.
 | Adapter | On-wire | Sidecar example | What the OS sees |
 |---------|---------|-----------------|------------------|
 | `ta320` | SB10 `:27182` | SidestickBridge → ViGEm Xbox 360 | Gamepad (not raw Thrustmaster HID) |
-| `magictrackpad` | TP10 `:27184` | GestureEngine inside PortClaim | SendInput or uinput pointer / scroll / mark |
+| `magictrackpad` | TP10/N1 `:27184` | Native Linux touchpad / Windows GestureEngine | libinput touchpad / Windows pointer, scroll, mark |
 | `mic` | AU10 `:27183` | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` | Handy records CABLE Output / `portclaim_mic.monitor` |
 | `xboxelite` | SB10 `:27185` | `xbox_sink` identity ViGEm | Xbox 360 pad (not SidestickBridge) |
 
@@ -492,7 +519,7 @@ flowchart LR
 | Kind | Hub | Wire | Inject |
 |------|-----|------|--------|
 | HID stick / pad | `hub/hid.py` `Adapter` (`matches` + `to_state`), register in `ADAPTERS` | SB10 | Sidecar (SidestickBridge) or `xbox_sink` identity ViGEm |
-| Contacts / gestures | `hub/trackpad.py` (not an `Adapter`) | TP10 | GestureEngine in `trackpad_sink.py` |
+| Contacts / gestures | `hub/trackpad.py` (not an `Adapter`) | TP10/N1 | Native Linux touchpad / Windows GestureEngine |
 | PCM | `hub/audio.py` | AU10 | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` |
 
 Today’s HID names: `ta320`, `xboxelite`, `generic`. `generic` is a
@@ -519,7 +546,7 @@ The pane matches the job, not a generic form.
 
 | Shape | Example | What the pane does |
 |-------|---------|-------------------|
-| Gesture / pointer | Magic Trackpad | Sliders and clamps in PortClaim. Engine is on the Receiver. Contract lives in the gesture section below. |
+| Gesture / pointer | Magic Trackpad | Native Linux: compositor profile. Windows/legacy: PortClaim sliders and GestureEngine contract below. |
 | Needs a game map | T.A320 | Claim + open sidecar. Do not duplicate SidestickBridge curves here. |
 | Identity pad | Xbox Elite | Claim + sink health. No second mapper. |
 | Audio | USB mic | Inject target, level, optional monitor. Not a DAW. |
@@ -534,7 +561,10 @@ New devices pick one of those four.
 
 ---
 
-## Gesture contract (Magic Trackpad `05AC:0265`)
+## Legacy gesture contract (Magic Trackpad `05AC:0265`)
+
+**Windows and explicit Linux `legacy` backend only.** Native Linux uses libinput
+semantics instead; see [Native Linux touchpad](docs/native-touchpad.md).
 
 Client-side only. Hub `hub/trackpad.py` streams TP10. Engine:
 `client/trackpad_sink.py` (`GestureEngine`). Receiver settings file on the
@@ -579,17 +609,24 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 |------|------|
 | `hub/server.py` | Claim/inventory HTTP |
 | `hub/hid.py` | T.A320 + Xbox Elite + `generic` HID adapters |
-| `hub/trackpad.py` | Magic Trackpad → TP10 @ 125 Hz |
+| `hub/trackpad.py` | Magic Trackpad → frame-boundary TP10/N1; descriptor API |
 | `hub/audio.py` | Mic → AU10 |
 | Adding a device | This README section + those three hub modules |
-| `client/trackpad_sink.py` | GestureEngine (SendInput / uinput) |
+| `client/native_touchpad.py` | Native Linux Type-B touchpad injection and watchdog |
+| `client/stream_guard.py` | Shared UDP sequence/freshness checks |
+| `client/trackpad_sink.py` | Backend selector; legacy GestureEngine (SendInput / uinput mouse) |
 | `client/trackpad_config.py` | Settings load/save/clamp |
 | `client/test_trackpad_gestures.py` | Gesture unit tests |
-| `client/receiver_app.py` | Mapping window; starts sinks if ports free |
+| `client/receiver_app.py` | Platform-aware controls; starts sinks if ports free |
+| `client/receiver_tray.py` | Optional Linux AppIndicator integration |
+| `client/test_platform_boundaries.py` | Mocked OS selection, claims, audio routing, and lifecycle contracts |
 | `client/mic_sink.py` | AU10 → VB-CABLE or PipeWire `portclaim_mic` |
-| `client/xbox_sink.py` | XB10 → ViGEm identity pad |
+| `client/xbox_sink.py` | SB10 → identity Xbox 360 (ViGEm / uinput) |
 | `client/claim.py` | `devices` / `claim` / `release` / `connect` |
-| `proto/` | SB10, AU10, TP10, XB10 constants |
+| `proto/` | SB10, AU10, TP10 codecs; `tp_native.py` lossless native extension |
+| `docs/native-touchpad.md` | Native architecture, compositor profile, upgrade/rollback, tests |
+| `docs/platform-separation.md` | Proposed OS boundaries, CI/release layout, and Linux packaging follow-up |
+| `tools/native-libinput-check.c` | Optional isolated real-libinput integration observer |
 | `client/PortClaim.spec` | Frozen `PortClaim.exe` |
 | `deploy/Build-Receiver.ps1` | Freeze + install Receiver (`%LOCALAPPDATA%\portclaim\`) |
 | `deploy/install.sh` | Node package + unit |

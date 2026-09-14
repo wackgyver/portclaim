@@ -83,6 +83,11 @@ class Registry:
             "dest_port": int(port_s),
             "claimed_at": time.time(),
         }
+        if adapter == "magictrackpad":
+            native = body.get("native_touchpad", False)
+            if type(native) is not bool:
+                raise ValueError("native_touchpad must be a boolean")
+            route["native_touchpad"] = native
         with self.lock:
             self.routes[adapter] = route
         return route
@@ -156,6 +161,11 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/v1/health":
             return self._json(200, {"ok": True, "role": "hub"})
+        if path == "/v1/devices/magictrackpad/descriptor":
+            try:
+                return self._json(200, trackpad_hub.descriptor())
+            except OSError as exc:
+                return self._json(503, {"error": str(exc)})
         if path == "/v1/devices":
             return self._json(200, {"devices": inventory(), **REG.snapshot()})
         if path == "/v1/routes":

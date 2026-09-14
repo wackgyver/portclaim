@@ -80,7 +80,11 @@ TAP_GHOST_S = 0.08
 
 ULONG_PTR = c_void_p
 
-STATS = {"tp10_last": 0.0, "tp10_packets": 0, "tp10_mode": "", "tp10_sticky": False, "listening": False}
+STATS = {"tp10_last": 0.0, "tp10_packets": 0, "tp10_mode": "", "tp10_sticky": False, "listening": False, "error": "", "backend": ""}
+
+
+def native_backend() -> bool:
+    return sys.platform != "win32" and os.environ.get("USB_LOOM_TP_BACKEND", "native") == "native"
 
 SPI_GETDRAGWIDTH = 0x004C
 SPI_GETDRAGHEIGHT = 0x004D
@@ -1025,6 +1029,11 @@ class GestureEngine:
 
 
 def serve(port: int) -> None:
+    if native_backend():
+        from native_touchpad import serve as serve_native
+        serve_native(port, STATS)
+        return
+    STATS.update(backend="legacy", error="")
     if sys.platform != "win32":
         try:
             _linux_uinput()

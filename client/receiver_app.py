@@ -7,8 +7,11 @@ on the local OS. SidestickBridge stays the T.A320 ViGEm map.
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import os
+import queue
+import signal
 import socket
 import subprocess
 import sys
@@ -47,13 +50,17 @@ SIDESTICK = os.environ.get("USB_LOOM_SIDESTICK", "").strip()
 
 
 class ReceiverApp:
-    def __init__(self, hub: str, dest_host: str, client_id: str) -> None:
+    def __init__(self, hub: str, dest_host: str, client_id: str, start_hidden: bool = False) -> None:
         self.hub = hub
         self.dest_host = dest_host
         self.client_id = client_id
         self.cfg = trackpad_config.load()
         self._busy = False
         self._last_devices: list[dict] = []
+        self._tray = None
+        self._hidden = False
+        self._closing = False
+        self._window_actions = queue.SimpleQueue()
         self.root = tk.Tk()
         self.root.title("PortClaim")
         self.root.configure(bg=BG)
@@ -61,9 +68,72 @@ class ReceiverApp:
         self.root.geometry("780x820")
         self._build_style()
         self._build()
+        if sys.platform == "linux":
+            self._setup_tray(start_hidden)
         self._ensure_sinks()
-        self._refresh_devices()
+        if not self._hidden:
+            self._refresh_devices()
         self.root.after(2000, self._tick)
+
+    def _setup_tray(self, start_hidden: bool) -> None:
+        try:
+            from receiver_tray import ReceiverTray
+            self._tray = ReceiverTray(self._request_window_action)
+        except Exception as exc:
+            # Never hide an app that has no usable way back to its controls.
+            print(f"PortClaim tray unavailable; keeping controls visible: {exc}", flush=True)
+        signal.signal(signal.SIGUSR1, lambda *_: self._request_window_action("show"))
+        signal.signal(signal.SIGUSR2, lambda *_: self._request_window_action("hide"))
+        if self._tray is not None:
+            self.root.protocol("WM_DELETE_WINDOW", self._hide_window)
+            self.root.bind("<Unmap>", self._on_unmap, add="+")
+        self.root.after(100, self._poll_window_actions)
+        if start_hidden:
+            self._hide_window()
+
+    def _request_window_action(self, action: str) -> None:
+        # SimpleQueue.put is reentrant, including from Python signal handlers.
+        if self._window_actions.qsize() < 16:
+            self._window_actions.put(action)
+
+    def _poll_window_actions(self) -> None:
+        if self._closing:
+            return
+        if self._tray is not None:
+            try:
+                self._tray.poll()
+            except Exception as exc:
+                print(f"PortClaim tray failed; restoring controls: {exc}", flush=True)
+                self._tray = None
+                self._show_window()
+        for _ in range(16):
+            try:
+                action = self._window_actions.get_nowait()
+            except queue.Empty:
+                break
+            if action == "show":
+                self._show_window()
+            elif action == "hide":
+                self._hide_window()
+            elif action == "quit":
+                self._closing = True
+                self.root.destroy()
+                return
+        self.root.after(100, self._poll_window_actions)
+
+    def _show_window(self) -> None:
+        self._hidden = False
+        self.root.deiconify()
+        self.root.lift()
+
+    def _hide_window(self) -> None:
+        if self._tray is not None:
+            self._hidden = True
+            self.root.withdraw()
+
+    def _on_unmap(self, event) -> None:
+        if event.widget == self.root and self.root.state() == "iconic":
+            self._hide_window()
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -88,6 +158,8 @@ class ReceiverApp:
         pad = {"padx": 16, "pady": 6}
         top = ttk.Frame(self.root)
         top.pack(fill="x", **pad)
+        if sys.platform == "linux":
+            ttk.Button(top, text="Hide to tray", command=self._hide_window).pack(side="right")
         ttk.Label(top, text="PortClaim", style="Head.TLabel").pack(anchor="w")
         ttk.Label(
             top,
@@ -161,7 +233,7 @@ class ReceiverApp:
         box = self._group(pane, "Xbox Elite")
         ttk.Label(
             box,
-            text="Microsoft pad on the hub (xpad). This Receiver injects an identity ViGEm Xbox 360 controller on UDP :27185. SidestickBridge stays the T.A320 map — the Elite does not share that window. Use an Ultrabase USB 2.0 jack (same hub as the condenser), not a USB 1.1 companion port.",
+            text="Microsoft pad on the hub (xpad). This Receiver injects an Xbox 360 controller on UDP :27185 (uinput on Linux, ViGEm on Windows). Unchanged reports do not cause repeated device writes. SidestickBridge stays the separate T.A320 map.",
             style="Panel.TLabel",
             wraplength=680,
         ).pack(anchor="w", pady=4)
@@ -177,7 +249,7 @@ class ReceiverApp:
         ttk.Label(
             box,
             text=(
-                "The hub captures the USB condenser (AU10). This Receiver injects PCM into PipeWire PortClaim Mic. Handy records portclaim_mic.monitor (or Default after the virtmic unit). Not a Bluetooth HFP pin, not the laptop built-in."
+                "The hub captures the USB condenser (AU10). This Receiver passes native-rate PCM to PipeWire PortClaim Mic. Handy records portclaim_mic.monitor; use app-specific routing rather than changing the desktop's default microphone."
                 if sys.platform != "win32"
                 else "The hub captures the USB condenser (AU10). This Receiver injects PCM into CABLE Input (VB-CABLE). Handy records CABLE Output — not Steam Streaming Microphone, and not a Bluetooth hands-free mic."
             ),
@@ -195,16 +267,17 @@ class ReceiverApp:
         self.mic_level = ttk.Label(box, text="Level: —", style="Panel.TLabel")
         self.mic_level.pack(anchor="w", pady=2)
         self.monitor_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            box,
-            text="Hear the stream on these speakers (howls if the condenser is in the same room)",
-            variable=self.monitor_var,
-            command=self._on_monitor,
-        ).pack(anchor="w", pady=6)
+        if sys.platform == "win32":
+            ttk.Checkbutton(
+                box,
+                text="Hear the stream on these speakers (howls if the condenser is in the same room)",
+                variable=self.monitor_var,
+                command=self._on_monitor,
+            ).pack(anchor="w", pady=6)
         ttk.Label(
             box,
             text=(
-                "Handy (AUR) records portclaim_mic.monitor. Bind Hyprland to handy --toggle-transcription. VAD off for the first proof. Leave monitor off — speakers into that dock mic howl. If Handy only lists Default, the virtmic unit already set that source."
+                "Handy (AUR) records portclaim_mic.monitor. Bind Hyprland to handy --toggle-transcription. If Handy lists only Default, configure its own ALSA/Pulse input routing. The receiver does not implement Linux speaker monitoring."
                 if sys.platform != "win32"
                 else "Handy records CABLE Output (VB-Audio Virtual Cable). Hold Ctrl+Space for the whole sentence. Turn Handy VAD off for the first proof. Leave monitor off — speakers into that dock mic howl."
             ),
@@ -215,6 +288,18 @@ class ReceiverApp:
     def _build_trackpad_pane(self) -> None:
         pane = ttk.Frame(self.pane_host)
         self.panes["magictrackpad"] = pane
+        if trackpad_sink.native_backend():
+            box = self._group(pane, "Native Magic Trackpad")
+            ttk.Label(
+                box,
+                text="Raw multi-touch contacts → Linux uinput touchpad → libinput/Wayland. "
+                     "Pointer motion, two-finger scrolling, tap/click and gestures are native OS input—not mouse emulation. "
+                     "Settings belong to your compositor's device profile (Omarchy: ~/.config/hypr/input.lua). "
+                     "The legacy tracking/flick sliders do not apply. Scroll momentum and pinch actions depend on the application.",
+                style="Panel.TLabel", wraplength=680,
+            ).pack(anchor="w", pady=8)
+            ttk.Label(box, text="Device: PortClaim Magic Trackpad · Transport: TP10/N1", style="Panel.TLabel").pack(anchor="w")
+            return
         canvas = tk.Canvas(pane, bg=BG, highlightthickness=0)
         scroll = ttk.Scrollbar(pane, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
@@ -530,10 +615,16 @@ class ReceiverApp:
         self.status.configure(text="SidestickBridge: click Mapping for the Xbox pad map.")
 
     def _tick(self) -> None:
+        if self._hidden:
+            # Sinks run independently; hidden controls need no HTTP polling or redraw.
+            self.root.after(2000, self._tick)
+            return
         last = trackpad_sink.STATS.get("tp10_last") or 0.0
         packets = trackpad_sink.STATS.get("tp10_packets") or 0
         mode = trackpad_sink.STATS.get("tp10_mode") or "-"
-        if last:
+        if trackpad_sink.STATS.get("error"):
+            tp = f"Trackpad: {trackpad_sink.STATS['error']}"
+        elif last:
             age = time.time() - last
             sticky = " sticky" if trackpad_sink.STATS.get("tp10_sticky") else ""
             tp = f"TP10 {age:.1f}s ago  {packets} frames  mode={mode}{sticky}"
@@ -583,18 +674,27 @@ class ReceiverApp:
         self.root.after(2000, self._tick)
 
     def run(self) -> int:
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            if self._tray is not None:
+                self._tray.close()
         return 0
 
 
-def main(hub: str | None = None, dest_host: str | None = None, client_id: str | None = None) -> int:
+def main(hub: str | None = None, dest_host: str | None = None,
+         client_id: str | None = None, start_hidden: bool = False) -> int:
     app = ReceiverApp(
         hub=hub or os.environ.get("USB_LOOM_HUB", "").strip(),
         dest_host=dest_host or os.environ.get("USB_LOOM_SELF", "").strip() or claim._self_host(),
         client_id=client_id or os.environ.get("USB_LOOM_CLIENT_ID", socket.gethostname()),
+        start_hidden=start_hidden,
     )
     return app.run()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="PortClaim Receiver")
+    parser.add_argument("--start-hidden", action="store_true", help="Start in the Linux system tray")
+    args = parser.parse_args()
+    raise SystemExit(main(start_hidden=args.start_hidden))

@@ -29,7 +29,10 @@ import wave
 from ctypes import wintypes
 from pathlib import Path
 
-import wasapi_out
+from stream_guard import StreamGuard
+
+if sys.platform == "win32":
+    import wasapi_out
 
 MAGIC = 0x30315541
 HEADER_SIZE = 16
@@ -123,7 +126,8 @@ def decode_au10(packet: bytes) -> tuple[int, int, int, bytes] | None:
     if len(packet) < HEADER_SIZE:
         return None
     magic, seq, rate, channels, bits, nbytes = struct.unpack("<I I I B B H", packet[:HEADER_SIZE])
-    if magic != MAGIC or bits != 16:
+    if (magic != MAGIC or bits != 16 or not 8000 <= rate <= 192000
+            or not 1 <= channels <= 8 or not nbytes or nbytes % (channels * 2)):
         return None
     pcm = packet[HEADER_SIZE : HEADER_SIZE + nbytes]
     if len(pcm) != nbytes:
@@ -215,8 +219,8 @@ class Agc:
     def __init__(self) -> None:
         self.gain = 3.0
 
-    def apply(self, pcm: bytes) -> bytes:
-        rms, _peak = pcm_levels(pcm)
+    def apply(self, pcm: bytes, levels: tuple[float, float] | None = None) -> bytes:
+        rms, _peak = pcm_levels(pcm) if levels is None else levels
         if rms >= SILENCE_RMS:
             desired = min(TARGET_RMS / max(rms, 1.0), AGC_MAX)
             self.gain = self.gain * 0.9 + desired * 0.1
@@ -228,12 +232,15 @@ class ProbeWriter:
 
     def __init__(self, path: Path, seconds: int = PROBE_SECONDS) -> None:
         self.path = path
+        self.enabled = os.environ.get("USB_LOOM_AUDIO_PROBE", "1").lower() not in {"0", "false", "no"}
         self.seconds = seconds
         self.rate = 44100
         self._buf = bytearray()
         self._last_write = 0.0
 
     def push(self, pcm: bytes, rate: int) -> None:
+        if not self.enabled:
+            return
         if rate:
             self.rate = rate
         self._buf.extend(pcm)
@@ -245,6 +252,8 @@ class ProbeWriter:
             self.flush()
 
     def flush(self) -> None:
+        if not self.enabled:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(self.path), "wb") as handle:
             handle.setnchannels(1)
@@ -390,8 +399,13 @@ class PulsePaplay:
                 self.proc.stdin.close()
             except OSError:
                 pass
+        import subprocess
         try:
             self.proc.terminate()
+            self.proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
         except OSError:
             pass
 
@@ -429,56 +443,60 @@ def pick_linux_sink(explicit: str) -> str:
 
 
 def _serve_linux(port: int, device_name: str, monitor: bool = False) -> None:
-    STATS["error"] = ""
-    STATS["listening"] = False
-    try:
-        sink = pick_linux_sink(device_name)
-        player = PulsePaplay(sink, INJECT_RATE)
-    except OSError as exc:
-        STATS["error"] = str(exc)
-        STATS["au10_device"] = ""
-        print(STATS["error"], flush=True)
-        return
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", port))
-    STATS["au10_device"] = sink
-    STATS["listening"] = True
-    MONITOR["enabled"] = monitor
-    STATS["monitor"] = monitor
-    print(f"AU10 sink listening UDP {port}  (PipeWire {sink})", flush=True)
-    if monitor:
-        print("monitor on — dock condenser into speakers howls", flush=True)
-    agc = Agc()
-    packets = 0
+    STATS.update(error="", listening=False)
+    player = None
     probe = ProbeWriter(PROBE_PATH)
     try:
-        while True:
-            data, _addr = sock.recvfrom(65535)
-            decoded = decode_au10(data)
-            if decoded is None:
-                continue
-            _seq, pkt_rate, _pkt_ch, pcm = decoded
-            probe.push(pcm, pkt_rate)
-            shaped = agc.apply(pcm)
-            mono = resample_s16(shaped, pkt_rate, INJECT_RATE)
-            player.write(mono)
-            packets += 1
-            rms, peak = pcm_levels(pcm)
-            STATS["au10_last"] = time.time()
-            STATS["au10_packets"] = packets
-            STATS["au10_rms"] = rms
-            STATS["au10_peak"] = peak
-            if packets == 1 or packets % 50 == 0:
-                print(f"frames {packets}  inject=paplay:{sink}  rms={rms:.0f} peak={peak:.0f}", flush=True)
+        sink = pick_linux_sink(device_name)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("0.0.0.0", port))
+            sock.settimeout(0.1)
+            STATS.update(au10_device=sink, listening=True, monitor=False)
+            MONITOR["enabled"] = False
+            print(f"AU10 listening UDP {port} (native-rate PCM → PipeWire {sink})", flush=True)
+            if monitor:
+                print("Linux speaker monitoring is not implemented; leaving it off", flush=True)
+            agc = Agc()
+            guard = StreamGuard(timeout=0.5)
+            packets = 0
+            while True:
+                try:
+                    data, _addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                decoded = decode_au10(data)
+                if decoded is None:
+                    continue
+                seq, rate, channels, pcm = decoded
+                if channels != 1:
+                    STATS["error"] = "AU10 Linux expects mono PCM"
+                    continue
+                if not guard.accept(seq, time.monotonic()):
+                    continue
+                if player is None or player.rate != rate:
+                    if player is not None:
+                        player.close()
+                    # PipeWire's stateful resampler owns conversion, not a fresh
+                    # Python interpolation loop on every ten-millisecond packet.
+                    player = PulsePaplay(sink, rate)
+                probe.push(pcm, rate)
+                levels = pcm_levels(pcm)
+                player.write(agc.apply(pcm, levels))
+                packets += 1
+                STATS.update(error="", au10_last=time.time(), au10_packets=packets,
+                             au10_rms=levels[0], au10_peak=levels[1], au10_rate=rate)
+                if packets == 1 or packets % 500 == 0:
+                    print(f"AU10 frames {packets}; native rate {rate}Hz; rms={levels[0]:.0f}", flush=True)
     except KeyboardInterrupt:
-        print("stopped")
-    except OSError as exc:
+        print("AU10 sink stopped", flush=True)
+    except (OSError, ValueError) as exc:
         STATS["error"] = str(exc)
         print(f"AU10 linux inject failed: {exc}", flush=True)
     finally:
         STATS["listening"] = False
         probe.flush()
-        player.close()
+        if player is not None:
+            player.close()
 
 
 def serve(port: int, device_name: str, monitor: bool = False) -> None:

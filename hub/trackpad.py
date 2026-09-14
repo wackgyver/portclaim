@@ -6,6 +6,8 @@ forwards contacts to the claimed sink.
 
 from __future__ import annotations
 
+import secrets
+import selectors
 import socket
 import sys
 import time
@@ -18,7 +20,9 @@ for candidate in (ROOT, PROTO):
         sys.path.insert(0, str(candidate))
 
 import tp10  # noqa: E402
+import tp_native  # noqa: E402
 from hid import (  # noqa: E402
+    ABS_MT_ORIENTATION,
     ABS_MT_POSITION_X,
     ABS_MT_POSITION_Y,
     ABS_MT_PRESSURE,
@@ -74,16 +78,19 @@ def wait_for_trackpads(ready: float = 3.0, want: int = 2) -> list[EvdevDevice]:
     (empty TP10, error -32 on the sibling interface).
     """
     deadline = time.monotonic() + max(0.2, ready)
-    best: list[EvdevDevice] = []
+    sibling_deadline = None
     while True:
         found = open_trackpads()
-        if len(found) >= want:
-            _close_trackpads(best)
+        # Bluetooth exposes one interface; this USB model needs both before grab.
+        required = 1 if found and found[0].id.bustype == 5 else want
+        if len(found) >= required:
             return found
-        _close_trackpads(best)
-        best = found
-        if time.monotonic() >= deadline:
-            return best
+        now = time.monotonic()
+        if found and sibling_deadline is None:
+            sibling_deadline = now + max(0.2, ready)
+        _close_trackpads(found)
+        if now >= (sibling_deadline if sibling_deadline is not None else deadline):
+            return []  # Never grab a half-initialized USB pair.
         time.sleep(0.2)
 
 
@@ -95,6 +102,46 @@ def merge_contacts(devs: list[EvdevDevice]) -> list[tuple[int, int, int, int, in
     rows = list(by_id.values())
     rows.sort(key=lambda r: r[0])
     return rows[: tp10.MAX_CONTACTS]
+
+
+def native_contacts(devs: list[EvdevDevice]) -> tuple[tp_native.Contact, ...]:
+    by_id = {}
+    for dev in devs:
+        for slot, rec in sorted(dev.mt_slots.items()):
+            tid = rec.get(ABS_MT_TRACKING_ID, -1)
+            if tid < 0 or ABS_MT_POSITION_X not in rec or ABS_MT_POSITION_Y not in rec:
+                continue
+            by_id[tid] = tp_native.Contact(
+                slot, tid, rec[ABS_MT_POSITION_X], rec[ABS_MT_POSITION_Y],
+                rec.get(ABS_MT_PRESSURE, 0), rec.get(ABS_MT_TOUCH_MAJOR, 0),
+                rec.get(ABS_MT_TOUCH_MINOR, 0), rec.get(ABS_MT_ORIENTATION, 0),
+            )
+    return tuple(sorted(by_id.values(), key=lambda c: c.tracking_id)[:tp10.MAX_CONTACTS])
+
+
+def descriptor() -> dict:
+    """Real kernel geometry, queried only at native receiver initialization."""
+    devs = open_trackpads()
+    try:
+        if not devs:
+            raise OSError("Magic Trackpad is not connected")
+        dev = devs[0]
+        codes = (ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_PRESSURE,
+                 ABS_MT_TOUCH_MAJOR, ABS_MT_TOUCH_MINOR, ABS_MT_ORIENTATION)
+        if any(code not in dev.abs for code in codes):
+            raise OSError("Magic Trackpad geometry is incomplete")
+        return {
+            "schema": 1, "transport": "TP10/N1", "name": dev.name,
+            "vendor": dev.id.vendor, "product": dev.id.product,
+            "bustype": dev.id.bustype, "version": dev.id.version,
+            "max_contacts": tp10.MAX_CONTACTS,
+            "axes": {str(code): {"minimum": dev.abs[code].minimum,
+                                  "maximum": dev.abs[code].maximum,
+                                  "resolution": dev.abs[code].resolution}
+                     for code in codes},
+        }
+    finally:
+        _close_trackpads(devs)
 
 
 def merge_buttons(devs: list[EvdevDevice]) -> int:
@@ -163,7 +210,6 @@ def buttons_of(dev: EvdevDevice) -> int:
 
 def stream_trackpad(route_fn, adapter_name: str = ADAPTER, hz: int = 125, grab: bool = True) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    period = 1.0 / max(30, hz)
     seq = 0
     miss_log = 0.0
     while True:
@@ -175,59 +221,70 @@ def stream_trackpad(route_fn, adapter_name: str = ADAPTER, hz: int = 125, grab: 
         if not devs:
             now = time.monotonic()
             if now - miss_log >= 10.0:
-                print("trackpad: no Magic Trackpad MT node yet", file=sys.stderr, flush=True)
+                print("trackpad: waiting for complete Magic Trackpad interfaces", flush=True)
                 miss_log = now
             time.sleep(0.5)
             continue
         paths = ",".join(str(d.path) for d in devs)
         print(f"stream {adapter_name} {paths} -> {route['dest_host']}:{route['dest_port']}", flush=True)
-        # hid-magicmouse feature report + second iface must exist before grab.
-        # Grabbing the first node alone drops the Ultrabase pad with error -32.
-        if grab:
+        epoch = secrets.randbits(32)
+        last_send = 0.0
+        last_log = 0.0
+
+        def send(capture_us, discontinuity=False, neutral=False):
+            nonlocal seq, epoch, last_send, last_log
+            current = route_fn(adapter_name)
+            if current is None:
+                return
+            if discontinuity:
+                epoch = secrets.randbits(32)
+            contacts = () if neutral else native_contacts(devs)
+            buttons = 0 if neutral else merge_buttons(devs)
+            rel = [0, 0, 0, 0]
             for dev in devs:
-                dev.grab(True)
-        last = 0.0
+                for i, value in enumerate(dev.take_rel()):
+                    rel[i] += value
+            seq = (seq + 1) & 0xFFFFFFFF
+            packet = tp_native.encode(tp_native.Frame(seq, buttons, contacts, epoch, capture_us,
+                                                     (0, 0, 0, 0) if neutral else tuple(rel)))
+            sock.sendto(packet, (current["dest_host"], current["dest_port"]))
+            last_send = time.monotonic()
+            if last_send - last_log >= 5.0:
+                print(f"tp10/n1 seq={seq} fingers={len(contacts)} buttons={buttons}", flush=True)
+                last_log = last_send
+
+        def report(_dev, capture_us, discontinuity):
+            send(capture_us, discontinuity)
+
         try:
-            while route_fn(adapter_name):
-                lost = False
+            with selectors.DefaultSelector() as selector:
                 for dev in devs:
-                    try:
-                        dev.pump()
-                    except OSError:
-                        print(f"lost {dev.path}", flush=True)
-                        lost = True
+                    if grab:
+                        dev.grab(True)
+                        if not dev.grabbed:
+                            raise OSError(f"cannot exclusively capture {dev.path}")
+                    dev.sync_state()
+                    selector.register(dev.fd, selectors.EVENT_READ, dev)
+                send(time.monotonic_ns() // 1000)
+                while True:
+                    current = route_fn(adapter_name)
+                    if current is None:
                         break
-                if lost:
-                    break
-                now = time.monotonic()
-                if now - last < period:
-                    time.sleep(max(0.0, period - (now - last)))
-                    continue
-                last = now
-                seq = (seq + 1) & 0xFFFFFFFF
-                current = route_fn(adapter_name)
-                if current is None:
-                    break
-                contacts = merge_contacts(devs)
-                buttons = merge_buttons(devs)
-                rel = [0, 0, 0, 0]
-                for dev in devs:
-                    dx, dy, wh, hw = dev.take_rel()
-                    rel[0] += dx
-                    rel[1] += dy
-                    rel[2] += wh
-                    rel[3] += hw
-                if seq == 1 or seq % 125 == 0 or contacts or any(rel) or buttons:
-                    print(
-                        f"tp10 seq={seq} fingers={len(contacts)} buttons={buttons} "
-                        f"rel={rel}",
-                        flush=True,
-                    )
-                sock.sendto(
-                    tp10.encode_tp10(seq, buttons, contacts, tuple(rel)),
-                    (current["dest_host"], current["dest_port"]),
-                )
+                    # Native gestures are clocked locally by libinput/apps. Legacy
+                    # Windows GestureEngine still needs its 125 Hz empty frames.
+                    period = 0.1 if current.get("native_touchpad") else 1.0 / max(30, hz)
+                    timeout = max(0.0, last_send + period - time.monotonic())
+                    ready = selector.select(timeout)
+                    for key, _mask in ready:
+                        key.data.pump(on_frame=report)
+                    if time.monotonic() - last_send >= period:
+                        send(time.monotonic_ns() // 1000)
+        except OSError as exc:
+            print(f"trackpad capture interrupted: {exc}", flush=True)
+            try:
+                send(time.monotonic_ns() // 1000, discontinuity=True, neutral=True)
+            except OSError:
+                pass  # Receiver watchdog independently cancels held gestures.
         finally:
-            for dev in devs:
-                dev.close()
+            _close_trackpads(devs)
         time.sleep(0.3)

@@ -1,0 +1,115 @@
+"""No live audio/gamepad output: changed-state and native-rate regression tests."""
+from enum import IntFlag
+import json
+from pathlib import Path
+import struct
+import tempfile
+import types
+import unittest
+from unittest.mock import MagicMock, patch
+
+import mic_sink
+import trackpad_config
+import xbox_sink
+
+
+# Pure XInput ABI constants. Importing vgamepad on Windows connects to the real
+# ViGEm bus at module import time; unit tests must not open a driver/device.
+class XUSB_BUTTON(IntFlag):
+    XUSB_GAMEPAD_DPAD_UP = 0x0001
+    XUSB_GAMEPAD_DPAD_DOWN = 0x0002
+    XUSB_GAMEPAD_DPAD_LEFT = 0x0004
+    XUSB_GAMEPAD_DPAD_RIGHT = 0x0008
+    XUSB_GAMEPAD_START = 0x0010
+    XUSB_GAMEPAD_BACK = 0x0020
+    XUSB_GAMEPAD_LEFT_THUMB = 0x0040
+    XUSB_GAMEPAD_RIGHT_THUMB = 0x0080
+    XUSB_GAMEPAD_LEFT_SHOULDER = 0x0100
+    XUSB_GAMEPAD_RIGHT_SHOULDER = 0x0200
+    XUSB_GAMEPAD_GUIDE = 0x0400
+    XUSB_GAMEPAD_A = 0x1000
+    XUSB_GAMEPAD_B = 0x2000
+    XUSB_GAMEPAD_X = 0x4000
+    XUSB_GAMEPAD_Y = 0x8000
+
+
+class GamepadTests(unittest.TestCase):
+    def setUp(self):
+        self.pad = MagicMock()
+        self.writer = xbox_sink.GamepadWriter(self.pad, types.SimpleNamespace(XUSB_BUTTON=XUSB_BUTTON))
+        self.idle = (32768, 32768, 32768, 32768, 0, 65535)
+
+    def test_repeated_unchanged_reports_do_one_update(self):
+        for _ in range(1000): self.writer.apply(self.idle)
+        self.pad.update.assert_called_once()
+
+    def test_button_edges_both_reach_device(self):
+        down = (*self.idle[:4], 1, 65535)
+        self.writer.apply(down); self.writer.apply(self.idle)
+        self.pad.press_button.assert_any_call(XUSB_BUTTON.XUSB_GAMEPAD_A)
+        self.pad.release_button.assert_any_call(XUSB_BUTTON.XUSB_GAMEPAD_A)
+        self.assertEqual(self.pad.update.call_count, 2)
+
+    def test_watchdog_neutralizes_once_then_accepts_same_state(self):
+        self.writer.apply(self.idle)
+        for _ in range(10): self.writer.neutral()
+        self.pad.reset.assert_called_once()
+        self.assertTrue(self.writer.apply(self.idle))
+        self.assertEqual(self.pad.update.call_count, 3)
+
+    def test_axes_triggers_and_diagonal_hat_preserved(self):
+        self.writer.apply((65535, 0, 0, 65535, (17 << 16) | (255 << 24), 4500))
+        self.pad.left_joystick.assert_called_once_with(32767, 32767)
+        self.pad.right_joystick.assert_called_once_with(-32768, -32767)
+        self.pad.left_trigger.assert_called_once_with(17)
+        self.pad.right_trigger.assert_called_once_with(255)
+        self.pad.press_button.assert_any_call(XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+        self.pad.press_button.assert_any_call(XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
+
+
+class AudioTests(unittest.TestCase):
+    def packet(self, seq=1, rate=44100, channels=1, pcm=b'\0\0' * 441):
+        return struct.pack('<IIIBBH', mic_sink.MAGIC, seq, rate, channels, 16, len(pcm)) + pcm
+
+    def test_rejects_invalid_audio_formats(self):
+        for packet in (self.packet(rate=0), self.packet(channels=0), self.packet(pcm=b'1'), self.packet()[:-1]):
+            self.assertIsNone(mic_sink.decode_au10(packet))
+
+    def test_agc_reuses_existing_level_sample(self):
+        with patch.object(mic_sink, 'pcm_levels', side_effect=AssertionError('duplicate level scan')):
+            mic_sink.Agc().apply(b'\x01\0' * 100, (1.0, 1.0))
+
+    def test_linux_streams_native_rate_without_python_resampling(self):
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recvfrom.side_effect = [(self.packet(), ('127.0.0.1', 1)), KeyboardInterrupt()]
+        player = MagicMock(); player.rate = 44100
+        with patch.dict('os.environ', {'USB_LOOM_AUDIO_PROBE': '0'}), patch.object(mic_sink, 'pick_linux_sink', return_value='test-mic'), patch.object(mic_sink.socket, 'socket', return_value=sock), patch.object(mic_sink, 'PulsePaplay', return_value=player) as constructor, patch.object(mic_sink, 'resample_s16', side_effect=AssertionError('Python resampling used')):
+            mic_sink._serve_linux(0, 'test-mic')
+        constructor.assert_called_once_with('test-mic', 44100)
+        player.write.assert_called_once()
+        player.close.assert_called_once()
+
+
+class ConfigSafetyTests(unittest.TestCase):
+    def test_bad_values_do_not_crash_loading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.json'
+            path.write_text(json.dumps({'tracking_speed': 'bad', 'scroll_speed': None,
+                                        'flick_force': [], 'invert_x': 'false'}))
+            cfg = trackpad_config.load(path)
+            self.assertEqual(cfg.tracking_speed, 5)
+            self.assertEqual(cfg.scroll_speed, 5)
+            self.assertFalse(cfg.invert_x)
+
+    def test_atomic_save_keeps_previous_file_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.json'
+            path.write_text('{"tracking_speed": 4}')
+            with patch.object(trackpad_config.os, 'replace', side_effect=OSError('test failure')):
+                with self.assertRaises(OSError): trackpad_config.save(trackpad_config.TrackpadConfig(), path)
+            self.assertEqual(json.loads(path.read_text()), {'tracking_speed': 4})
+            self.assertEqual(list(Path(temp).iterdir()), [path])
+
+
+if __name__ == '__main__': unittest.main()

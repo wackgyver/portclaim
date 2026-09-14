@@ -56,6 +56,7 @@ install -m 0755 "$ROOT/hub/hid.py" "$ROOT/hub/server.py" "$ROOT/hub/audio.py" "$
 install -m 0644 "$ROOT/proto/sb10.py" /usr/local/lib/usb-loom/sb10.py
 install -m 0644 "$ROOT/proto/au10.py" /usr/local/lib/usb-loom/au10.py
 install -m 0644 "$ROOT/proto/tp10.py" /usr/local/lib/usb-loom/tp10.py
+install -m 0644 "$ROOT/proto/tp_native.py" /usr/local/lib/usb-loom/tp_native.py
 cat > /usr/local/sbin/usb-loom-hub <<'EOF'
 #!/bin/sh
 exec /usr/bin/python3 /usr/local/lib/usb-loom/server.py "$@"
