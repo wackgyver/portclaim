@@ -8,9 +8,9 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mic_sink
-import trackpad_config
-import xbox_sink
+from client.common import audio as mic_sink
+from client.common import trackpad_config
+from client.common import gamepad as xbox_sink
 
 
 # Pure XInput ABI constants. Importing vgamepad on Windows connects to the real
@@ -79,16 +79,6 @@ class AudioTests(unittest.TestCase):
         with patch.object(mic_sink, 'pcm_levels', side_effect=AssertionError('duplicate level scan')):
             mic_sink.Agc().apply(b'\x01\0' * 100, (1.0, 1.0))
 
-    def test_linux_streams_native_rate_without_python_resampling(self):
-        sock = MagicMock()
-        sock.__enter__.return_value = sock
-        sock.recvfrom.side_effect = [(self.packet(), ('127.0.0.1', 1)), KeyboardInterrupt()]
-        player = MagicMock(); player.rate = 44100
-        with patch.dict('os.environ', {'USB_LOOM_AUDIO_PROBE': '0'}), patch.object(mic_sink, 'pick_linux_sink', return_value='test-mic'), patch.object(mic_sink.socket, 'socket', return_value=sock), patch.object(mic_sink, 'PulsePaplay', return_value=player) as constructor, patch.object(mic_sink, 'resample_s16', side_effect=AssertionError('Python resampling used')):
-            mic_sink._serve_linux(0, 'test-mic')
-        constructor.assert_called_once_with('test-mic', 44100)
-        player.write.assert_called_once()
-        player.close.assert_called_once()
 
 
 class ConfigSafetyTests(unittest.TestCase):

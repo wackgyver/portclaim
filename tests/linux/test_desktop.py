@@ -3,12 +3,13 @@ import queue
 import unittest
 from unittest.mock import MagicMock, patch
 
-import receiver_app
+from client.linux import desktop
+from client import ui as receiver_app
 
 
 class ReceiverVisibilityTests(unittest.TestCase):
     def setUp(self):
-        self.app = receiver_app.ReceiverApp.__new__(receiver_app.ReceiverApp)
+        self.app = desktop.Controller.__new__(desktop.Controller)
         self.app.root = MagicMock()
         self.app._tray = MagicMock()
         self.app._hidden = False
@@ -39,9 +40,13 @@ class ReceiverVisibilityTests(unittest.TestCase):
 
     def test_hidden_tick_does_not_poll_hub(self):
         self.app._hidden = True
-        self.app._tick()
-        self.app._refresh_devices.assert_not_called()
-        self.app.root.after.assert_called_once_with(2000, self.app._tick)
+        view = receiver_app.ReceiverApp.__new__(receiver_app.ReceiverApp)
+        view.desktop = self.app
+        view.root = self.app.root
+        view._refresh_devices = MagicMock()
+        view._tick()
+        view._refresh_devices.assert_not_called()
+        view.root.after.assert_called_once_with(2000, view._tick)
 
     def test_menu_and_signal_actions_run_on_tk_poll(self):
         self.app._request_window_action("hide")

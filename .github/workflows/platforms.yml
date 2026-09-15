@@ -1,0 +1,102 @@
+name: Platform checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  common:
+    name: Common / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.12', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests/common -t . -v
+
+  linux-hub:
+    name: Linux / hub / source package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s tests/linux -t . -v
+      - run: python -m unittest discover -s tests/hub -t . -v
+      - name: Linux runtime dependencies (no virtual device creation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libevdev2
+          python -m venv "$RUNNER_TEMP/portclaim-runtime"
+          "$RUNNER_TEMP/portclaim-runtime/bin/python" -m pip install -r deploy/linux/requirements.txt
+          "$RUNNER_TEMP/portclaim-runtime/bin/python" -m pip check
+          "$RUNNER_TEMP/portclaim-runtime/bin/python" -c 'import evdev, libevdev, vgamepad'
+      - name: Shell syntax
+        run: find deploy tools -name '*.sh' -print0 | xargs -0 -r -n1 sh -n
+      - name: Verify rendered user unit offline
+        run: python tools/check_linux_unit.py
+      - name: Build Linux source artifact
+        run: python tools/package_linux.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: portclaim-linux-source
+          path: dist/portclaim-linux-source.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows / driver-free frozen build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s tests/windows -t . -v
+      - name: Parse every PowerShell entry point without running installers
+        shell: pwsh
+        run: |
+          Get-ChildItem deploy -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - run: python -m pip install -r deploy/windows/requirements-build.txt
+      - name: Build only (no MSI, installation, shortcuts, or driver connection)
+        shell: pwsh
+        run: ./deploy/Build-Receiver.ps1 -BuildOnly
+      - name: Frozen executable import smoke (not hardware acceptance)
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'portclaim-platform.json'
+          $exe = Join-Path $PWD 'dist/PortClaim/PortClaim.exe'
+          $proc = Start-Process -FilePath $exe -ArgumentList "--check-platform `"$report`"" -PassThru
+          if (-not $proc.WaitForExit(60000)) { Stop-Process -Id $proc.Id; throw 'Frozen import probe timed out' }
+          if ($proc.ExitCode -ne 0 -or -not (Test-Path $report)) { throw 'Frozen import probe failed' }
+          $data = Get-Content $report -Raw | ConvertFrom-Json
+          if ($data.platform -ne 'windows' -or -not $data.frozen -or -not $data.ui_imported -or $data.driver_imported -or $data.linux_backend_imported) { throw 'Frozen platform boundary failed' }
+          Get-Content $report
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: portclaim-windows-x64-preview
+          path: dist/PortClaim/
+          if-no-files-found: error
+          retention-days: 14

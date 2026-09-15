@@ -10,7 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import struct
 
-import tp10
+if __package__:
+    from . import tp10
+else:  # Flat module installation on existing hubs remains supported.
+    import tp10
 
 EXTENSION = struct.Struct("<4sIQ")
 DETAIL = struct.Struct("<iHHh")

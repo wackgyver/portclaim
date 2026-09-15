@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from mic_sink import ProbeWriter
+from client.common.audio import ProbeWriter
 
 
 class AudioProbeTests(unittest.TestCase):

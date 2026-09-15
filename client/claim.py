@@ -13,164 +13,33 @@ USB_LOOM_TOKEN). There is no baked LAN default.
 
 from __future__ import annotations
 
+if not __package__:
+    import bootstrap
+    bootstrap.setup()
+
 import argparse
 import json
 import os
 import socket
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-
-DEFAULT_PORTS = {
-    "ta320": 27182,
-    "generic": 27182,
-    "mic": 27183,
-    "magictrackpad": 27184,
-    "xboxelite": 27185,
-}
+from client import platforms
+from client.common import claims
+from client.common.environment import load_receiver_env as _load_receiver_env
+from client.common.claims import DEFAULT_PORTS, GENESIS, CONNECT, request, guess_dest, _port_open, _self_host, _token
 
 
-def _load_receiver_env() -> None:
-    if sys.platform == "win32":
+def _register_and_claim(hub, client_id, adapter, dest):
+    return claims._register_and_claim(hub, client_id, adapter, dest,
+                                      native_touchpad=platforms.native_backend())
+
+
+def _start_sidestick():
+    if platforms.name() != "windows":
+        print("SidestickBridge is Windows-only; Linux can claim ta320 but has no bundled mapper.")
         return
-    from pathlib import Path
-
-    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    path = Path(xdg) / "portclaim" / "usb-loom.env"
-    if not path.is_file():
-        return
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    for line in text.splitlines():
-        raw = line.strip()
-        if not raw or raw.startswith("#") or "=" not in raw:
-            continue
-        key, value = raw.split("=", 1)
-        key = key.strip()
-        if key and key not in os.environ:
-            os.environ[key] = value.strip().strip('"').strip("'")
-
-
-_load_receiver_env()
-
-
-def _token() -> str:
-    return os.environ.get("USB_LOOM_TOKEN", "").strip()
-
-
-def _self_host() -> str:
-    env = os.environ.get("USB_LOOM_SELF", "").strip()
-    if env:
-        return env
-    hostname = socket.gethostname()
-    try:
-        ip = socket.gethostbyname(hostname)
-    except OSError:
-        ip = ""
-    if ip and not ip.startswith("127."):
-        return ip
-    return ""
-
-
-SIDESTICK_DEFAULT = os.environ.get("USB_LOOM_SIDESTICK", "").strip()
-GENESIS = ("ta320", "magictrackpad")
-CONNECT = ("ta320", "magictrackpad", "mic", "xboxelite")
-
-
-def request(hub: str, method: str, path: str, body: dict | None = None) -> dict:
-    if not _token():
-        raise SystemExit("USB_LOOM_TOKEN is unset")
-    if not hub:
-        raise SystemExit("set --hub or USB_LOOM_HUB")
-    url = hub.rstrip("/") + path
-    data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "X-Usb-Loom-Token": _token(),
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise SystemExit(f"{exc.code} {path}: {detail}") from exc
-
-
-def guess_dest(port: int) -> str:
-    ip = _self_host()
-    if not ip:
-        raise SystemExit("set USB_LOOM_SELF or --dest (no LAN default)")
-    return f"{ip}:{port}"
-
-
-def _register_and_claim(hub: str, client_id: str, adapter: str, dest: str) -> dict:
-    request(
-        hub,
-        "POST",
-        "/v1/clients",
-        {
-            "id": client_id,
-            "name": client_id,
-            "host": dest.rsplit(":", 1)[0],
-            "data_port": int(dest.rsplit(":", 1)[-1]),
-        },
-    )
-    return request(
-        hub,
-        "POST",
-        f"/v1/devices/{adapter}/claim",
-        {"client_id": client_id, "dest": dest,
-         **({"native_touchpad": sys.platform != "win32" and os.environ.get("USB_LOOM_TP_BACKEND", "native") == "native"}
-            if adapter == "magictrackpad" else {})},
-    )
-
-
-def _port_open(port: int) -> bool:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind(("0.0.0.0", port))
-        return False
-    except OSError:
-        return True
-    finally:
-        sock.close()
-
-
-def _sidestick_running() -> bool:
-    try:
-        out = subprocess.check_output(
-            ["tasklist", "/FI", "IMAGENAME eq SidestickBridge.exe", "/NH"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return False
-    return "SidestickBridge.exe" in out
-
-
-def _start_sidestick() -> None:
-    exe = SIDESTICK_DEFAULT
-    if _port_open(27182):
-        print("SidestickBridge already listening on :27182")
-        return
-    if _sidestick_running():
-        print("SidestickBridge is open but Stopped. Click Start bridge — Host IP is this Receiver (Dest / USB_LOOM_SELF).")
-        return
-    if not os.path.isfile(exe):
-        print(f"SidestickBridge not found: {exe}")
-        print("Install the receiver or start Remote host yourself, then claim ta320.")
-        return
-    print(f"starting SidestickBridge --listen  {exe}")
-    creation = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen([exe, "--listen"], creationflags=creation)
+    from client.windows.sidecar import _start_sidestick as start
+    start()
 
 
 def _start_xbox_sink() -> None:
@@ -180,7 +49,7 @@ def _start_xbox_sink() -> None:
     if getattr(sys, "frozen", False):
         import threading
 
-        import xbox_sink
+        from client import xbox_sink
 
         threading.Thread(target=xbox_sink.serve, args=(27185,), name="xb10-sink", daemon=True).start()
         print("starting xboxelite ViGEm sink on :27185 (in-process)")
@@ -198,9 +67,7 @@ def _connect(hub: str, client_id: str, dest_host: str) -> int:
         sys.path.insert(0, here)
     import threading
 
-    import mic_sink
-    import receiver_app
-    import trackpad_sink
+    from client import mic_sink, receiver_app, trackpad_sink
 
     _start_sidestick()
     _start_xbox_sink()
@@ -220,13 +87,14 @@ def _connect(hub: str, client_id: str, dest_host: str) -> int:
             daemon=True,
         ).start()
     if not _port_open(27185):
-        import xbox_sink
+        from client import xbox_sink
 
         threading.Thread(target=xbox_sink.serve, args=(27185,), name="xb10-sink", daemon=True).start()
     return receiver_app.main(hub=hub, dest_host=dest_host, client_id=client_id)
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_receiver_env()
     parser = argparse.ArgumentParser(description="PortClaim claim client")
     parser.add_argument("--hub", default=os.environ.get("USB_LOOM_HUB", ""))
     parser.add_argument("--client-id", default=os.environ.get("USB_LOOM_CLIENT_ID", socket.gethostname()))
@@ -287,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
-        import mic_sink
+        from client import mic_sink
 
         if args.list_devices:
             return mic_sink.main(["--list"])

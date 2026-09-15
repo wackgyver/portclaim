@@ -1,0 +1,4 @@
+# Linux runtime only. No Windows driver installers or DLL dependencies.
+evdev==2.0.0
+libevdev==0.13.1
+vgamepad==0.1.0

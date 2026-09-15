@@ -1,0 +1,4 @@
+# Build tools only. Do NOT pip-install vgamepad's sdist on Windows: its setup
+# invokes an MSI installer. prepare_vgamepad.py stages the checksum-verified
+# binding/DLL files; ViGEmBus and VB-CABLE remain explicit runtime prerequisites.
+pyinstaller==6.22.3

@@ -1,0 +1,7 @@
+# Optional AppIndicator integration; GTK3/AppIndicator system libraries are required.
+pystray==0.19.5
+PyGObject==3.58.0
+pycairo==1.29.1
+pillow==12.3.0
+python-xlib==0.33
+six==1.17.0

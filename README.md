@@ -359,9 +359,9 @@ into PVE.
 ## Receiver
 
 One hub and shared wire protocols, with OS-specific receiver behavior and
-packaging. See the [platform-separation proposal](docs/platform-separation.md)
-for module boundaries, independent Windows/Linux CI, and separate release assets.
-It is a proposal, not an already completed directory refactor or Windows release.
+packaging. See [platform separation](docs/platform-separation.md) for the module
+map, independent Windows/Linux CI and preview artifacts. Platform backends are
+separate; a configured workflow or Linux test run is not a Windows release.
 
 ### Receiver on Windows
 
@@ -377,7 +377,8 @@ Fill Hub and Dest in the window, or set `USB_LOOM_HUB` / `USB_LOOM_SELF`
 / `USB_LOOM_TOKEN`. One process must own UDP `:27184`.
 
 ```powershell
-Get-NetUDPEndpoint -LocalPort 27184 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+# Quit the existing PortClaim Receiver explicitly before installing.
+python -m pip install -r deploy/windows/requirements-build.txt
 .\deploy\Build-Receiver.ps1
 Start-Process "$env:LOCALAPPDATA\portclaim\Receiver\PortClaim.exe"
 # prove owner is PortClaim, not python
@@ -387,6 +388,10 @@ Start-Process "$env:LOCALAPPDATA\portclaim\Receiver\PortClaim.exe"
 python client\claim.py --hub http://HUB:27180 devices
 python client\claim.py --hub http://HUB:27180 claim magictrackpad --dest DEST:27184
 ```
+
+Use `-BuildOnly` to build without installing or changing shortcuts. Windows
+builds prepare verified vgamepad files without executing its MSI setup script.
+See [Windows packaging and driver prerequisites](deploy/windows/README.md).
 
 Handy records **CABLE Output**. Point it there. Steam Streaming Microphone
 is leftover Remote Play hardware.
@@ -402,26 +407,26 @@ from `client/`.
 Omarchy (Arch + Hyprland) is a **Receiver only**. The hub stays on the
 USB appliance. This is not an official Omarchy package.
 
-**Packaging caveat:** the checked-in Arch installer is the older bootstrap,
-not the hardened tray/service setup. It grants `input` group membership, changes
-the default microphone, enables a microphone service, and installs an automatic
-receiver restart policy. It does not install the optional tray dependencies or
-single-instance launcher. Do not rerun it over a working configured installation.
-See [the packaging gap and proposed migration](docs/platform-separation.md#known-linux-packaging-gap).
-The existing bootstrap below is for a new host only, after reviewing those effects.
+Use [Linux packaging](deploy/linux/README.md) from a reviewed revision or Linux
+source artifact containing the new layout. It installs private dependency venvs,
+a single-instance launcher, a tray-aware user service and an owned temporary mic.
+It **does not** start/enable services, change groups/udev or audio defaults, or
+apply desktop settings. Existing manual/legacy installs require a reviewed
+migration and are refused rather than overwritten.
 
 ```bash
-git clone https://github.com/wackgyver/portclaim.git
-cd portclaim
+./deploy/install-receiver.sh --dry-run
 ./deploy/install-receiver.sh
-# fill ~/.config/portclaim/usb-loom.env from deploy/HANDOVER.omarchy.example.md
-systemctl --user enable --now portclaim
+# Fill the private ~/.config/portclaim/usb-loom.env, then start explicitly:
+portclaim
+# portclaim show | hide | stop | status
 ```
 
-`install-receiver.sh` puts you in group `input` (`/dev/uinput`), loads a
-PipeWire null sink **PortClaim Mic**, and can point you at AUR `handy`
-(`yay -S handy` or `omarchy-pkg-aur-install handy`; `handy-bin` if the
-source build hurts).
+Prerequisites include Tk, PipeWire/Pulse clients and pre-existing scoped uinput
+access. Optional AppIndicator dependencies enable the tray; `--without-tray`
+keeps controls visible. Login autostart and restart loops remain off by default.
+See [opt-in Omarchy integration](integrations/omarchy/README.md) for the device
+profile; no compositor or dictation keybinding is installed automatically.
 
 | Adapter | Linux inject |
 |---------|--------------|
@@ -430,14 +435,10 @@ source build hurts).
 | `mic` | Native-rate AU10 → PipeWire `portclaim_mic`; Handy records `portclaim_mic.monitor` |
 | `ta320` | Claim only. SidestickBridge stays Windows. |
 
-Handy on Linux often lists only **Default**. The virtmic unit sets the
-default source to `portclaim_mic.monitor`. Bind Hyprland to
-`handy --toggle-transcription` (do not rely on in-app Ctrl+Space). VAD
-off for the first proof. Leave the Receiver speaker monitor off.
-
-If Handy cannot hear the monitor, use a dictation app that can pick a
-Pulse source (`nerd-dictation`). Same virtual cable; the hub does not
-change.
+Configure Handy or another recorder to use **`portclaim_mic.monitor`**.
+If it exposes only Default, use app-specific input routing rather than changing
+the desktop source. The owned mic helper never changes that default. Dictation
+installation, GPU settings and shortcuts are separate, opt-in workstation work.
 
 **Native trackpad upgrade:** deploy the hub's TP10/N1 extension and descriptor API
 before switching Linux receivers. See [the native guide](docs/native-touchpad.md)
@@ -532,12 +533,12 @@ a new UDP port in the `2718x` band. Do not overload TP10 / SB10 / AU10.
 
 1. **Hub capture** — new `Adapter` or a dedicated hub module. `GET /v1/devices` must list it.
 2. **Claim** — `CLAIMABLE` in `hub/server.py`. Names in `ADAPTERS` are already claimable; `mic` and `magictrackpad` are extras. Start a stream thread if it is not HID.
-3. **Port** — `DEFAULT_PORTS` in `client/claim.py` and constants in `proto/` (see `proto/sb10.py`). One UDP port per data plane.
+3. **Port** — `DEFAULT_PORTS` in `client/common/claims.py` and constants in `proto/` (see `proto/sb10.py`). One UDP port per data plane.
 4. **Udev** — vid/pid stay-powered + `SYSTEMD_WANTS=usb-loom-hub.service` in `deploy/99-usb-loom.rules`. `deploy/install.sh` must install any new `hub/*.py` / `proto/*.py`.
-5. **Sink or sidecar** — in-process in `receiver_app._ensure_sinks`, or an external mapper via env (`USB_LOOM_SIDESTICK`). Do not share one ViGEm window across two adapters.
-6. **Receiver pane** — `SUPPORTED` and `_build_*_pane` in `client/receiver_app.py`. Dest label from the Dest field. Copy states where mapping lives (this window vs sidecar).
+5. **Sink or sidecar** — in-process in `client/ui.py`'s `_ensure_sinks`, or an external mapper via env (`USB_LOOM_SIDESTICK`). Do not share one ViGEm window across two adapters.
+6. **Receiver pane** — `SUPPORTED` and `_build_*_pane` in `client/ui.py`. Dest label from the Dest field. Copy states where mapping lives (this window vs sidecar).
 7. **Settings** — inject-side knobs only. `%LOCALAPPDATA%\portclaim\` with live reload (`trackpad.json` is the template). Hub stays dumb capture.
-8. **Tests** — if there is an engine, add tests beside `client/test_trackpad_gestures.py`.
+8. **Tests** — use `tests/common/`, `tests/hub/`, `tests/linux/` or `tests/windows/`; keep shared changes covered on both OSes.
 9. **Docs** — protocol block, Extending-a-claim table, this section. Freeze `PortClaim.exe` if client changed. Bounce the hub **only** when hub / proto / udev / `install.sh` changed.
 
 ### Settings pane by use case
@@ -567,8 +568,10 @@ New devices pick one of those four.
 semantics instead; see [Native Linux touchpad](docs/native-touchpad.md).
 
 Client-side only. Hub `hub/trackpad.py` streams TP10. Engine:
-`client/trackpad_sink.py` (`GestureEngine`). Receiver settings file on the
-sink host. Tests: `client/test_trackpad_gestures.py`.
+`client/common/legacy_gestures.py` (`GestureEngine`, with an explicit OS output
+adapter). Receiver settings file on the sink host.
+Tests: `tests/common/test_legacy_gestures.py`; the old explicit unittest module
+command in `client/` remains a compatibility entry point.
 
 | Fingers | Does | Does not |
 |---------|------|----------|
@@ -612,22 +615,27 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 | `hub/trackpad.py` | Magic Trackpad → frame-boundary TP10/N1; descriptor API |
 | `hub/audio.py` | Mic → AU10 |
 | Adding a device | This README section + those three hub modules |
-| `client/native_touchpad.py` | Native Linux Type-B touchpad injection and watchdog |
-| `client/stream_guard.py` | Shared UDP sequence/freshness checks |
-| `client/trackpad_sink.py` | Backend selector; legacy GestureEngine (SendInput / uinput mouse) |
-| `client/trackpad_config.py` | Settings load/save/clamp |
-| `client/test_trackpad_gestures.py` | Gesture unit tests |
-| `client/receiver_app.py` | Platform-aware controls; starts sinks if ports free |
-| `client/receiver_tray.py` | Optional Linux AppIndicator integration |
-| `client/test_platform_boundaries.py` | Mocked OS selection, claims, audio routing, and lifecycle contracts |
+| `client/linux/` | Native touchpad, PipeWire, uinput factories, tray/signal lifecycle |
+| `client/windows/` | SendInput, WASAPI/waveOut, ViGEm factory, sidecar and window lifecycle |
+| `client/common/` | Claims, sequence guards, gesture math, settings, PCM and gamepad helpers |
+| `client/platforms.py` | Lazy OS selection and driver-free diagnostics |
+| `client/trackpad_sink.py` | Compatible TP10 CLI and backend dispatch |
+| `client/receiver_app.py` | Thin compatible application entry point |
+| `client/ui.py`, `client/legacy_ui.py` | Shared mapping shell and legacy controls |
+| `tests/{common,hub,linux,windows}/` | Partitioned contracts and platform/packaging checks |
 | `client/mic_sink.py` | AU10 → VB-CABLE or PipeWire `portclaim_mic` |
 | `client/xbox_sink.py` | SB10 → identity Xbox 360 (ViGEm / uinput) |
 | `client/claim.py` | `devices` / `claim` / `release` / `connect` |
 | `proto/` | SB10, AU10, TP10 codecs; `tp_native.py` lossless native extension |
 | `docs/native-touchpad.md` | Native architecture, compositor profile, upgrade/rollback, tests |
-| `docs/platform-separation.md` | Proposed OS boundaries, CI/release layout, and Linux packaging follow-up |
+| `docs/platform-separation.md` | OS boundaries, validation gates and artifact limitations |
+| `deploy/linux/`, `deploy/windows/` | Separate installers, helpers and dependency/build manifests |
+| `integrations/omarchy/` | Opt-in device-specific desktop profile |
+| `.github/workflows/platforms.yml` | Independent common, Linux/hub and Windows build checks |
+| `tools/package_linux.py` | Deterministic credential-free Linux source artifact |
+| `tools/check_linux_unit.py` | Offline rendered-unit verification; no service operations |
 | `tools/native-libinput-check.c` | Optional isolated real-libinput integration observer |
-| `client/PortClaim.spec` | Frozen `PortClaim.exe` |
+| `client/PortClaim.spec` | Compatibility entry for `deploy/windows/PortClaim.spec` |
 | `deploy/Build-Receiver.ps1` | Freeze + install Receiver (`%LOCALAPPDATA%\portclaim\`) |
 | `deploy/install.sh` | Node package + unit |
 | `deploy/always-on.sh` | Lid/sleep ignore |

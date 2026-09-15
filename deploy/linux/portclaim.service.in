@@ -1,0 +1,28 @@
+[Unit]
+Description=PortClaim LAN Receiver
+After=graphical-session.target pipewire-pulse.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=@ENV_FILE@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TMPDIR=%t/portclaim
+Environment=PYSTRAY_BACKEND=appindicator
+WorkingDirectory=@SOURCE@
+RuntimeDirectory=portclaim
+RuntimeDirectoryMode=0700
+ExecStartPre=@PYTHON@ @MIC_HELPER@ start
+ExecStart=@PYTHON@ @RECEIVER@ --start-hidden
+ExecStopPost=@PYTHON@ @MIC_HELPER@ stop
+Restart=no
+TimeoutStopSec=5
+KillMode=control-group
+UMask=0077
+MemoryAccounting=yes
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=120
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,45 +1,13 @@
-"""No real uinput in unit tests: verify the protocol and exact Linux event contract."""
+"""Linux input lifecycle with fake uinput and sockets."""
 from dataclasses import replace
-import struct
 import unittest
 from unittest.mock import MagicMock, patch
+from proto import tp10, tp_native as wire
+from client.common.stream_guard import StreamGuard
+from client import trackpad_sink
+from tests.fixtures import descriptor_data, contact, frame, FakeInput
 
-import native_touchpad as native
-import trackpad_sink
-import tp10
-import tp_native as wire
-from stream_guard import StreamGuard
-
-
-def descriptor_data():
-    geometry = {native.X: (-3678, 3934, 47), native.Y: (-2478, 2587, 44),
-                native.PRESSURE: (0, 253, 0), native.MAJOR: (0, 1020, 0),
-                native.MINOR: (0, 1020, 0), native.ORIENTATION: (-3, 4, 0)}
-    return {"schema": 1, "transport": "TP10/N1", "vendor": 0x05AC, "product": 0x0265,
-            "bustype": 3, "version": 1, "max_contacts": 5,
-            "axes": {str(k): dict(zip(("minimum", "maximum", "resolution"), v)) for k, v in geometry.items()}}
-
-
-def contact(tid=1, x=0, y=0, slot=0):
-    return wire.Contact(slot, tid, x, y, 60, 80, 60, 0)
-
-
-def frame(*contacts, seq=1, buttons=0, epoch=123):
-    return wire.Frame(seq, buttons, tuple(contacts), epoch, 1000000)
-
-
-class FakeInput:
-    def __init__(self, caps, **kwargs):
-        self.caps, self.options = caps, kwargs
-        self.events = []
-        self.closed = False
-    def write(self, *event):
-        self.events.append(event)
-    def syn(self):
-        self.events.append((0, 0, 0))
-    def close(self):
-        self.closed = True
-
+from client.linux import native_touchpad as native
 
 class NativeInputTests(unittest.TestCase):
     def setUp(self):
@@ -124,42 +92,6 @@ class NativeInputTests(unittest.TestCase):
         data['axes'][str(native.X)]['resolution'] = 0
         with self.assertRaises(ValueError): native.Descriptor(data)
 
-
-class NativeProtocolTests(unittest.TestCase):
-    def test_full_identity_size_orientation_roundtrip(self):
-        c = replace(contact(60000), major=950, minor=600, orientation=-3)
-        original = frame(c, contact(60001), seq=0xFFFFFFFF)
-        packet = wire.encode(original)
-        self.assertEqual(len(packet), 146)
-        self.assertEqual(wire.decode(packet), original)
-        legacy = tp10.decode_tp10(packet)
-        self.assertIsNotNone(legacy)
-        # Check the actual Windows/legacy receiver decoder, not only the codec.
-        self.assertEqual(trackpad_sink.decode_tp10(packet), legacy)
-        self.assertEqual(legacy[2][0][5], 255)
-        self.assertEqual(legacy[2][0][1], 32767)
-
-    def test_rel_trailer_preserved_for_legacy_receiver(self):
-        original = replace(frame(contact()), rel=(1, -2, 3, 4))
-        packet = wire.encode(original)
-        self.assertEqual(wire.decode(packet), original)
-        self.assertEqual(tp10.decode_tp10(packet)[3], original.rel)
-        self.assertEqual(trackpad_sink.decode_tp10(packet)[3], original.rel)
-
-    def test_malformed_or_legacy_packets_rejected_by_native(self):
-        packet = wire.encode(frame(contact()))
-        for length in (0, 12, 79, 80, 145):
-            self.assertIsNone(wire.decode(packet[:length]))
-        self.assertIsNone(wire.decode(packet + b'\0'))
-        bad = bytearray(packet); bad[80:84] = b'BAD!'
-        self.assertIsNone(wire.decode(bytes(bad)))
-        bad = bytearray(packet); bad[9] = 6
-        self.assertIsNone(wire.decode(bytes(bad)))
-
-    def test_duplicate_full_tracking_ids_rejected(self):
-        self.assertIsNone(wire.decode(wire.encode(frame(contact(5), contact(5, slot=1)))))
-
-
 class NativeServeTests(unittest.TestCase):
     def test_watchdog_cancels_and_reconnect_discards_old_input(self):
         clock = [1.0]
@@ -184,7 +116,7 @@ class NativeServeTests(unittest.TestCase):
             raise KeyboardInterrupt()
         sock.recvfrom.side_effect = receive
         stats = {}
-        with patch.dict(native.os.environ, {'USB_LOOM_HUB': 'http://127.0.0.1:27180'}), patch('claim.request', return_value=descriptor_data()), patch.object(native.socket, 'getaddrinfo', return_value=[(2, 2, 0, '', ('127.0.0.1', 0))]), patch.object(native.socket, 'socket', return_value=sock), patch.object(native, 'NativeTouchpad', side_effect=make_pad), patch.object(native, 'discard_pending', return_value=0), patch.object(native.time, 'monotonic', side_effect=lambda: clock[0]):
+        with patch.dict(native.os.environ, {'USB_LOOM_HUB': 'http://127.0.0.1:27180'}), patch('client.common.claims.request', return_value=descriptor_data()), patch.object(native.socket, 'getaddrinfo', return_value=[(2, 2, 0, '', ('127.0.0.1', 0))]), patch.object(native.socket, 'socket', return_value=sock), patch.object(native, 'NativeTouchpad', side_effect=make_pad), patch.object(native, 'discard_pending', return_value=0), patch.object(native.time, 'monotonic', side_effect=lambda: clock[0]):
             with self.assertRaises(KeyboardInterrupt): native.serve(0, stats)
         self.assertEqual(len(devices), 2)
         self.assertTrue(all(d.closed for d in devices))
@@ -200,39 +132,3 @@ class NativeServeTests(unittest.TestCase):
         sock.recvfrom.return_value = (b'old', ('127.0.0.1', 1))
         self.assertEqual(native.discard_pending(sock), 512)
         sock.settimeout.assert_called_with(.1)
-
-
-class StreamGuardTests(unittest.TestCase):
-    def test_wrap_duplicate_reordering_and_loss(self):
-        g = StreamGuard()
-        self.assertTrue(g.accept(0xFFFFFFFF, 1))
-        self.assertTrue(g.accept(0, 1.01))
-        self.assertFalse(g.accept(0, 1.02))
-        self.assertFalse(g.accept(0xFFFFFFFF, 1.03))
-        self.assertTrue(g.accept(3, 1.04))
-        self.assertEqual(g.missing, 2)
-        self.assertEqual(g.rejected, 2)
-
-    def test_restart_epoch_rejects_old_stream(self):
-        g = StreamGuard()
-        g.accept(100, 1, 10)
-        self.assertTrue(g.accept(1, 1.01, 20))
-        self.assertTrue(g.resync)
-        self.assertFalse(g.accept(101, 1.02, 10))
-
-    def test_timeout_allows_counter_restart_and_requires_resync(self):
-        g = StreamGuard()
-        g.accept(100, 1)
-        self.assertTrue(g.expired(1.6))
-        self.assertTrue(g.accept(1, 1.6))
-        self.assertTrue(g.resync)
-
-    def test_duplicates_cannot_keep_watchdog_alive(self):
-        g = StreamGuard()
-        g.accept(100, 1)
-        self.assertFalse(g.accept(100, 1.4))
-        self.assertTrue(g.expired(1.5))
-
-
-if __name__ == '__main__':
-    unittest.main()

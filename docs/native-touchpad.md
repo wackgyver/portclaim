@@ -128,18 +128,20 @@ Do not reset shared audio, input permissions, or desktop settings.
 
 ## Tests
 
-From `client/`, with the receiver's Python environment:
+From the repository root, with the receiver's Python environment:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -t .
 ```
 
-`test_native_touchpad.py` uses fake uinput to verify exact event lifecycles,
-full-width wire data, identity changes, fractional-scale-free coordinates,
-sequence handling, and cancellation. `test_hub_capture.py` tests complete report
-boundaries, hot-plug timing, and overflow resynchronization without touching USB.
-`test_sink_efficiency.py` covers native-rate audio, unchanged Xbox reports, and
-atomic configuration saves. Existing legacy gesture and visibility tests remain.
+`tests/linux/test_native_touchpad.py` uses fake uinput to verify exact event
+lifecycles, identity changes, fractional-scale-free coordinates and cancellation.
+`tests/common/test_protocols.py` covers full-width wire data, legacy compatibility
+and sequencing. `tests/hub/test_capture.py` tests report boundaries, hot-plug
+timing and overflow resynchronization without touching USB. Audio, unchanged
+Xbox reports, configuration, legacy gestures and visibility tests live in the
+corresponding common/Linux/Windows partitions. See [platform separation](platform-separation.md)
+for independent OS gates; mocked tests are not physical input acceptance.
 
 An optional real-libinput observer is `tools/native-libinput-check.c`. Compile
 as shown in that file. It opens **only** the supplied test input node and must

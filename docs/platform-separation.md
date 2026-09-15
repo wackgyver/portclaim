@@ -1,138 +1,132 @@
-# Platform separation — proposal
+# Platform separation
 
-**Status: proposed layout and release gates, not a completed directory migration.**
-The native-touchpad work adds guarded Linux implementations to the existing tree.
-Do not mistake Linux validation or a review-branch push for a tested Windows release.
+**One repository, one hub, one shared protocol.** Receiver code, dependencies,
+packaging and tests are separated by platform. Omarchy is an opt-in Linux
+integration profile, not a fork of the claim fabric.
 
-## Decision recommended
+This describes the source layout and configured build gates. A local Linux test
+run does not certify Windows, and adding a workflow does not mean it has run.
+Do not merge/release a platform until its relevant gates actually pass.
 
-Keep **one PortClaim repository, one hub, and one versioned wire contract**.
-Separate the receiver's OS backends, dependencies, packaging, tests, and release
-artifacts. Omarchy is a Linux integration profile, not a second claim fabric.
-
-A separate `portclaim-omarchy` repository would duplicate the hub/protocol or
-require a third shared package immediately. Fixing framing, authentication, or
-compatibility would then require coordinated releases across repositories. The
-receivers are small enough that enforceable module boundaries are the simpler
-way to protect Windows while improving Linux.
-
-Separate repositories become reasonable if the receivers acquire independent
-maintainers, permissions, or substantially different release cadences. In that
-case, first extract a versioned protocol/control-client package; do not copy the
-hub into two products.
-
-## Current boundaries
-
-| Surface | Windows | Linux |
-|---------|---------|-------|
-| Trackpad | Existing `GestureEngine` + SendInput | `native_touchpad.py` + uinput/libinput; explicit legacy fallback |
-| Microphone | Existing WASAPI + waveOut fallback / VB-CABLE | `_serve_linux()` native-rate PCM / PipeWire |
-| Xbox | vgamepad / ViGEm | vgamepad / uinput |
-| Window lifecycle | Existing visible-window lifecycle | Optional AppIndicator, close-to-tray, show/hide signals |
-| Build/install | `PortClaim.spec`, `deploy/*Receiver*.ps1` | Existing Arch bootstrap plus separately configured local service |
-
-The native selector cannot activate on Windows, even if
-`USB_LOOM_TP_BACKEND=native` is present. Linux-only tray initialization is guarded.
-Native trackpad claims opt into a slower idle heartbeat; Windows/legacy claims
-retain their original timer cadence. TP10/N1 preserves the legacy packet prefix.
-
-Codecs, claim handling, configuration validation, and Xbox changed-state/watchdog
-logic are shared. Therefore, **the entire Windows application is not byte-for-byte
-unchanged**. Shared changes need tests for both platforms. `wasapi_out.py`, the
-legacy gesture engine, and Windows deployment scripts were not rewritten by the
-native feature.
-
-`client/test_platform_boundaries.py` checks backend selection, claim flags,
-Windows window lifecycle, WASAPI routing, waveOut fallback, and Linux dispatch
-with mocked I/O. Gamepad unit tests use plain ABI constants instead of importing
-vgamepad, whose Windows import connects to the real ViGEm bus. These are contract
-tests, not proof that a frozen executable works with Windows drivers.
-
-## Proposed layout
+## Layout and ownership
 
 ```text
-hub/                         # One Linux USB capture/control service
-proto/                       # Shared codecs and compatibility contract
+hub/                         Shared Linux USB capture/control service (unchanged)
+proto/                       SB10, AU10, legacy TP10 and native TP10/N1
 client/
-  common/                    # Claims, transport, pure shared helpers
-  windows/                   # SendInput, WASAPI/waveOut, ViGEm adapters/UI
-  linux/                     # Native touchpad, PipeWire, tray/lifecycle
-  receiver_app.py             # Thin platform selection + common shell
-integrations/
-  omarchy/                   # Opt-in Hyprland profile and desktop instructions
-deploy/
-  hub/
-  windows/                   # Windows installer/build and dependency set
-  linux/                     # Linux launcher, systemd unit, mic ownership helper
-tests/                       # See test partitions below
+  common/                    HTTP claims, codecs/helpers, config, gesture math,
+                             shared gamepad state/transport and stream guards
+  windows/                   SendInput, WASAPI/waveOut, ViGEm factory, sidecar,
+                             normal visible-window lifecycle
+  linux/                     Native touchpad, PipeWire, uinput factories,
+                             AppIndicator/signal lifecycle and native settings pane
+  platforms.py               Lazy adapter selection; driver-free diagnostics
+  receiver_app.py            Compatible CLI / application entry point
+  ui.py                      Shared Tk mapping/claim shell
+  legacy_ui.py               Shared legacy gesture controls
+  {claim,mic_sink,trackpad_sink,xbox_sink}.py  Compatible CLI facades
+integrations/omarchy/         Opt-in device profile; never auto-applied
+deploy/linux/                User-only installer, launcher, unit and owned mic
+deploy/windows/              Build/source installation, static dependency prep
+tests/{common,hub,windows,linux}/
+.github/workflows/platforms.yml
 ```
 
-The `tests/` partitions should be `common/`, `hub/`, `windows/`, and `linux/`.
-The layout is illustrative: retain compatibility entry points while moving code,
-and fix package imports/build manifests rather than moving files blindly.
+Hub deployment assets remain at their existing `deploy/` paths. Moving those
+would add deployment risk without improving receiver isolation. Flat Windows
+PowerShell/spec commands forward to `deploy/windows/`; the Linux shell installer
+forwards to `deploy/linux/install.py`. Compatibility imports remain for moved
+config, stream-guard, native-touchpad, tray and WASAPI modules.
 
-### Boundary rules
+## Boundary rules
 
-- Common code must not import Windows DLLs, GTK, PipeWire, evdev, or a driver that
-  connects to hardware at import time. Select adapters at the application edge.
-- Native Linux input must not call the legacy gesture engine. If the explicit
-  Linux legacy fallback remains, share its pure gesture logic, not Windows APIs.
-- Windows must not require Linux GUI/input packages; Linux must not install
-  ViGEm, VB-CABLE, or Windows DLLs. Keep separate dependency/build manifests.
-- Compositor gestures and Omarchy keybindings belong in opt-in integration files,
-  not the shared protocol, hub, or Windows UI.
-- Shared hub/protocol changes require backward-compatibility fixtures, including
-  old receivers reading the TP10/N1 prefix and legacy heartbeat behavior.
+- Common modules do not import Windows DLLs, Tk/GTK, evdev or driver packages.
+  Gesture math takes an explicit output adapter; its default cannot inject input.
+- The application edge selects adapters. Windows always uses the legacy gesture
+  engine, even with `USB_LOOM_TP_BACKEND=native`. Native Linux bypasses that engine.
+- Gamepad factories load vgamepad only when starting the sink. Import/build probes
+  must not connect to ViGEm or create uinput devices.
+- Linux runtime/source artifacts exclude Windows adapters. The Windows frozen
+  build excludes Linux adapters and their input/tray dependencies.
+- Shared UI has no Windows process/DLL or Linux tray/signal implementation.
+  Linux native settings direct users to the compositor; Windows/legacy settings
+  retain the existing gesture controls. Windows-only speaker monitoring stays
+  absent from the Linux controls.
+- Configuration loads explicitly at application entry, not on common API import.
+  Credentials, filled env files and machine-specific settings are never packaged.
 
-## GitHub workflow and releases
+## Stable contracts
 
-Use a single integration branch (`main`) after both platform gates are in place.
-Use short-lived feature/review branches—not permanent `windows` and `linux`
-branches that accumulate separate protocol fixes.
+The extraction retains the legacy gesture algorithm, SendInput payloads,
+WASAPI/waveOut path, shared gamepad mapping and native input protocol. Transport
+bytes, hub capture and the HTTP API are not redesigned. The native codec supports
+both package imports and existing flat hub installations.
 
-Recommended independent GitHub Actions checks:
+Native trackpad claims still request `native_touchpad: true` and 100 ms idle
+heartbeats; Windows/legacy retain the original cadence. TP10/N1 preserves the old
+prefix/trailer. Common tests exercise the actual legacy receiver decoder, not
+only the encoder. Receiver-only packaging work needs no hub restart.
 
-1. **Protocol/common:** codecs, claim schema, platform-selection contracts,
-   malformed packets, sequencing, and legacy compatibility.
-2. **Linux/hub:** mocked evdev/uinput/audio tests, shell/unit validation, dependency
-   isolation, and packaging. Hardware/libinput acceptance remains a separate test.
-3. **Windows:** platform tests and a frozen executable build/import smoke check.
-   Keep driver-free tests separate from ViGEm/VB-CABLE hardware integration.
+Shared code is **not** platform-independent release evidence. Changes to claims,
+configuration, gesture math, codecs or gamepad logic require both OS gates.
+The UI extraction also fixes deferred error reporting: it captures an exception's
+message before Tk invokes the callback, and reports claim failures instead of
+leaving the operation busy. It does not change claim ownership semantics.
 
-Publish distinct release assets from the same reviewed source revision, for
-example `portclaim-windows-x64.zip` and `portclaim-linux-x86_64.tar.gz`, with a hub
-compatibility declaration. Mark a platform preview as such rather than implying
-that a successful build on the other OS validates it. No workflows, branch
-protection, repository creation, or release publication are implemented by this
-proposal.
+## Packaging safety
 
-## Safe migration sequence
+See [Linux installation/migration/rollback](../deploy/linux/README.md) and
+[Windows build/installation](../deploy/windows/README.md).
 
-1. Preserve the working native implementation on a review branch. Keep the
-   existing default branch until the platform gates have actually passed.
-2. Bring Linux packaging into line with the intended runtime (below), in an
-   independently reviewable change. Do not alter Windows deployment while doing it.
-3. Extract OS adapters with no intentional behavior change; keep existing command
-   entry points and the wire protocol stable. Add import-boundary/dependency tests.
-4. Add independent CI/build jobs and release artifacts. Test Windows on Windows;
-   Linux mocks alone cannot certify its frozen application or device behavior.
-5. Merge only after required gates and the relevant hardware smoke checks. Avoid
-   redeploying the hub for a receiver-only organizational change.
+The new Linux installer uses immutable source snapshots and reusable private
+venvs, private env mode 0600, managed-file checks, explicit stopped upgrades and
+rollback backups. It never grants input-group access, starts/enables services,
+changes desktop audio defaults, applies Hyprland settings or changes claims.
+Existing manual/legacy installations require a reviewed migration; do not run
+this over a working installation as an automatic conversion. Older flat
+`deploy/portclaim*.service`/virtmic assets are legacy, not the new installation.
 
-### Known Linux packaging gap
+Windows build dependency preparation verifies the upstream vgamepad archive and
+copies only approved bindings/DLLs/license without running its MSI-launching
+setup script. `-BuildOnly` never installs drivers or shortcuts. Explicit Windows
+installation commands retain their system-changing driver/shortcut behavior and
+are not CI steps.
 
-The checked-in `deploy/install-receiver.sh` predates the safer configured runtime.
-It uses system/user Python rather than the isolated receiver venv, does not install
-the optional tray dependencies/launcher, grants `input` group membership, starts
-a separate microphone service that changes the default source, and installs a
-receiver unit with automatic restart. Its live env template is installed mode 0644.
-It must **not** be rerun over an existing working installation as a harmless update.
+## Independent validation gates
 
-The next Linux packaging change should provide generic, credential-free versions
-of the single-instance launcher, owned temporary microphone helper, desktop entry,
-and start-hidden service; private env mode 0600; isolated dependencies; explicit
-permission checks; no login autostart or restart loop by default; and no global
-microphone/keybinding changes. A tray failure must retain visible controls.
-Keep device/profile changes opt-in and test installation/rollback on a clean host.
-Machine-specific credentials, SSH keys, and live user configuration remain outside
-this repository.
+1. **Common:** Python 3.12/3.14 on Linux and Windows. Wire compatibility, gesture
+   behavior, claim flags, configuration, gamepad mapping and strict import guards.
+2. **Linux/hub:** mocked native input/audio/tray/capture, installation transactions,
+   mic ownership, shell syntax, offline verification of the rendered systemd unit
+   (including spaces/percent paths), dependency imports, deterministic source
+   packaging and an unpacked artifact import probe. Mocked systemd/uinput tests are not clean-host desktop
+   or real libinput acceptance.
+3. **Windows:** mocked audio/input/lifecycle, actual Windows ctypes ABI, safe
+   dependency prep, PowerShell parsing, frozen executable build and import probe.
+   ViGEmBus, VB-CABLE, real SendInput and audio/device acceptance remain separate.
+
+Local commands from the repository root:
+
+```sh
+python -m unittest discover -s tests/common -t .
+python -m unittest discover -s tests/linux -t .    # Linux
+python -m unittest discover -s tests/hub -t .      # Linux
+python -m unittest discover -s tests/windows -t . # Windows; mocks can also run on Linux
+python tools/check_linux_unit.py                 # Offline syntax only; no service changes
+python tools/package_linux.py
+```
+
+`python client/receiver_app.py --check-platform /tmp/platform.json` imports the
+selected adapters and UI, writes bounded non-secret diagnostics, and exits without
+starting the receiver. Windows uses the same flag with an appropriate local path.
+
+CI uploads separate **preview build artifacts**, not releases. The Linux archive
+is source plus an installer, not a bundled cross-distribution binary; it needs
+host libraries and dependency installation. The Windows artifact is the frozen
+x64 directory. Keep `main` protected through review and actual required checks;
+this change does not configure repository branch protection or publish a release.
+Use short-lived review branches, not permanent divergent OS branches.
+
+Split repositories only if independent maintainers/permissions/release cadences
+justify it later; first extract a versioned shared protocol/control-client package
+instead of duplicating the hub.

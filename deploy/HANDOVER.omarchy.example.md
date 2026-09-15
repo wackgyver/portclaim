@@ -35,9 +35,9 @@ Same contract as the Windows Receiver: hub AU10 → PortClaim inject → Handy r
 |-------|--------|
 | AUR package | `handy` (fallback `handy-bin`, then `nerd-dictation`) |
 | Inject sink | `portclaim_mic` |
-| Handy input | Default (virtmic sets default source to `portclaim_mic.monitor`) |
+| Handy input | `portclaim_mic.monitor`, or app-specific routing when only Default is exposed |
 | VAD | Off for the first proof |
-| Hyprland bind | `bind = SUPER, Space, exec, handy --toggle-transcription` |
+| Hyprland bind | Choose separately; check collisions and update Omarchy's keybinding learner |
 | Speaker monitor | Off (dock condenser howls) |
 
 Proof before blaming Handy: AU10 pane shows RMS, then
@@ -57,7 +57,10 @@ ss -ulnp | grep 2718
 # after Claim: one-finger move, two-finger click = right, two-finger scroll
 ```
 
-Log out once after install so group `input` applies (`/dev/uinput`).
+The new installer does not change input groups or desktop audio defaults, and
+does not enable/start services. Verify scoped `/dev/uinput` access beforehand;
+launch explicitly with `portclaim`. Existing manual installs require a reviewed
+migration: see [Linux packaging](linux/README.md).
 
 ## Out of scope on this box
 
