@@ -68,7 +68,8 @@ def source_files(root):
             result[str(Path("src") / relative)] = path.read_bytes()
     for name in ("virtmic.py", "portclaim.py"):
         result[f"helpers/{name}"] = (root / "deploy/linux" / name).read_bytes()
-    for name in ("portclaim.service.in", "portclaim.desktop.in", "requirements.txt", "requirements-tray.txt"):
+    for name in ("portclaim.service.in", "portclaim.desktop.in", "requirements.txt", "requirements-tray.txt",
+                 "packages-camera.arch.txt"):
         result[f"packaging/{name}"] = (root / "deploy/linux" / name).read_bytes()
     if "src/client/receiver_app.py" not in result or "src/proto/tp_native.py" not in result:
         raise ValueError("incomplete receiver source tree")

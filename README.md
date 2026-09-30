@@ -87,6 +87,10 @@ Receiver sinks
   PortClaim.exe           mapping UI; owns :27184 when healthy
 ```
 
+Optional webcam: **MJPEG/1 over authenticated HTTP on the same control port**,
+not a new UDP port. Video-only Linux receiver preview, disabled on the hub until
+explicit operator opt-in and never included in bulk Connect. See [Webcam](docs/webcam.md).
+
 Health: `GET /v1/health`. Inventory: `GET /v1/devices`. Native touchpad geometry:
 `GET /v1/devices/magictrackpad/descriptor`. Auth: header `X-Usb-Loom-Token`
 (see Site config). Native trackpad claims set `native_touchpad: true` for a
@@ -109,6 +113,12 @@ Fail closed. There is no baked hub IP, dest IP, or token in the tree.
 | `USB_LOOM_SELF` | Receiver address the hub can reach (LAN or overlay). |
 | `USB_LOOM_SSH_TARGET` | `root@HUB` for `deploy/Deploy-Hub.ps1`. |
 | `USB_LOOM_SIDESTICK` | Optional path to SidestickBridge (T.A320 → ViGEm). |
+| `USB_LOOM_CAMERA_ENABLED` | Hub-only opt-in, exactly `1`; unset/other values disable webcam claims. |
+| `USB_LOOM_CAMERA_DEVICE` | Optional hub-only stable `/dev/v4l/by-id/…` or `by-path/…` source selector. |
+| `USB_LOOM_CAMERA_OUTPUT` | Receiver-only, separately provisioned dedicated virtual `/dev/videoN`; no default. |
+| `USB_LOOM_STORAGE_SSH` | Optional receiver-only dedicated restricted SSH alias for explicit read-only Storage; no fallback or auto-connect. |
+| `USB_LOOM_STORAGE_UNMOUNT_SSH` | Optional separate unmount-only restricted SSH alias for the same hub; explicit confirmation, no admin fallback. |
+| `USB_LOOM_MIC_USB_ID` | Hub-only `VID:PID` microphone pin; required with webcam support. Missing/ambiguous target means no capture, never another mic. |
 
 On the hub node, `deploy/install.sh --token …` writes `/etc/usb-loom.env`.
 Copy `deploy/usb-loom.env.example`; never commit a filled `.env`.
@@ -140,7 +150,7 @@ the hub **pushes UDP** at Dest.
 flowchart LR
   recv[Receiver_host]
   hub[Hub]
-  recv -->|"TCP_27180_claim"| hub
+  recv -->|"TCP_27180_control_camera_pull"| hub
   hub -->|"UDP_27182_to_27185"| recv
 ```
 
@@ -434,6 +444,13 @@ profile; no compositor or dictation keybinding is installed automatically.
 | `xboxelite` | vgamepad → uinput Xbox 360; writes changed states only |
 | `mic` | Native-rate AU10 → PipeWire `portclaim_mic`; Handy records `portclaim_mic.monitor` |
 | `ta320` | Claim only. SidestickBridge stays Windows. |
+| `webcam` | Explicit MJPEG HTTP pull → FFmpeg → dedicated `PortClaim Camera` V4L2 loopback (preview) |
+
+Xbox stick direction is normalized at the receiver's platform boundary: Linux
+keeps evdev's negative-up Y axes; Windows converts them to XInput's positive-up
+axes. Both sticks use the correct default without a custom mapping profile.
+This fixes the old Linux-only vertical inversion; hub/SB10 bytes, buttons,
+triggers and D-pad behavior are unchanged.
 
 Configure Handy or another recorder to use **`portclaim_mic.monitor`**.
 If it exposes only Default, use app-specific input routing rather than changing
@@ -452,6 +469,55 @@ and neutralizes held input when the stream goes stale.
 
 ---
 
+## Webcam (Linux receiver preview)
+
+The existing hub can capture native UVC baseline MJPEG without a software encoder.
+The Linux receiver decodes into a **separately provisioned** exclusive-caps
+`v4l2loopback` named **PortClaim Camera**. Camera applications can select that
+input after activation; actual application/hardware acceptance is still required.
+Windows virtual-camera injection is not implemented.
+
+Use **Webcam → Start & claim camera**, then **Stop camera**. Connect, login,
+receiver startup and reconnect never claim it automatically. Hiding the window
+keeps an explicitly activated camera running; Stop or Quit ends it. Video only:
+no webcam-microphone selection and no recording. Pin the existing microphone with
+`USB_LOOM_MIC_USB_ID` before enabling hub webcam support; the DCMT condenser's
+model is `31b2:0011`. Pinning uses a stable ALSA ID and never falls back to the
+webcam or internal audio when the selected microphone is absent. A private short-lived lease
+allows one stream owner; it is never published in inventory or routes.
+
+See [webcam setup, protocol, safety, tests and rollback](docs/webcam.md) and
+[optional Arch packages](deploy/linux/packages-camera.arch.txt). The receiver
+installer does not install/load a kernel module, grant camera permissions, or
+change the existing hub. Live hub deployment needs an approved interruption and
+exact preservation/restoration of existing routes.
+
+## Storage (read-only receiver preview)
+
+**Storage (read-only)** opens a separate explicit volume browser. It can page
+through directories, preview bounded UTF-8 text and import selected files to a
+new local filename with cancellation and checksum verification. Save suggests a
+sanitized basename while leaving destination confirmation explicit. Media files can
+be downloaded for local inspection; remote streaming playback and exports/writes
+are not implemented. Filesystem caveats remain visible; inspection is not a
+consistency or recovery certificate.
+
+Storage uses **encrypted, independently restricted SSH**, not the plain-HTTP
+control token or HID routes. A separately provisioned unprivileged helper exposes
+only administrator-approved, already read-only-mounted USB ext4 volumes. It never
+mounts/repairs disks, follows symlinks, executes files or exposes a generic host
+filesystem. Startup, Connect and reconnect do not activate storage. No live
+provisioning, SSH key, mount or policy is included in receiver installation.
+
+Optional **Unmount selected volume…** uses a separately authorized, forced-command
+unmount-only key and root helper. It checks the selected volume generation,
+refuses active transfers/busy mounts and never force/lazy-unmounts or remounts.
+The browsing key remains unprivileged; unmount is not disk power-off or repair.
+
+See [storage setup, limits, security and acceptance](docs/storage.md). Dedicated
+SSH access, filesystem condition, mount visibility and real transfers remain
+separate deployment gates. Do not reuse a hub administrator/root key.
+
 ## Extending a claim
 
 PortClaim **claims the port** and delivers a stable LAN stream. It does
@@ -466,6 +532,7 @@ host → what the OS or game sees.
 | `magictrackpad` | TP10/N1 `:27184` | Native Linux touchpad / Windows GestureEngine | libinput touchpad / Windows pointer, scroll, mark |
 | `mic` | AU10 `:27183` | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` | Handy records CABLE Output / `portclaim_mic.monitor` |
 | `xboxelite` | SB10 `:27185` | `xbox_sink` identity ViGEm | Xbox 360 pad (not SidestickBridge) |
+| `webcam` | MJPEG/1 HTTP `:27180` (pull) | Linux FFmpeg + dedicated v4l2loopback | PortClaim Camera (video only; preview) |
 
 ### Example — T.A320 + SidestickBridge + Starfield
 
@@ -522,18 +589,21 @@ flowchart LR
 | HID stick / pad | `hub/hid.py` `Adapter` (`matches` + `to_state`), register in `ADAPTERS` | SB10 | Sidecar (SidestickBridge) or `xbox_sink` identity ViGEm |
 | Contacts / gestures | `hub/trackpad.py` (not an `Adapter`) | TP10/N1 | Native Linux touchpad / Windows GestureEngine |
 | PCM | `hub/audio.py` | AU10 | `mic_sink` → VB-CABLE or PipeWire `portclaim_mic` |
+| UVC camera | `hub/webcam.py`, `hub/v4l2_capture.py` | Authenticated MJPEG/1 HTTP pull | Linux-only dedicated V4L2 loopback |
 
 Today’s HID names: `ta320`, `xboxelite`, `generic`. `generic` is a
 fallback stick, not a license to skip `matches()`.
 
-A new *kind* (keyboard frames, usbip, …) needs a new `proto/` magic and
-a new UDP port in the `2718x` band. Do not overload TP10 / SB10 / AU10.
+A new *kind* needs its own bounded protocol contract. For new UDP kinds, use a
+new `proto/` magic and port rather than overload TP10 / SB10 / AU10. Webcam is the
+exception to the UDP transport pattern: multipart framing and private leases on
+the authenticated control HTTP port; no image fragmentation in HID packets.
 
 ### Checklist
 
 1. **Hub capture** — new `Adapter` or a dedicated hub module. `GET /v1/devices` must list it.
-2. **Claim** — `CLAIMABLE` in `hub/server.py`. Names in `ADAPTERS` are already claimable; `mic` and `magictrackpad` are extras. Start a stream thread if it is not HID.
-3. **Port** — `DEFAULT_PORTS` in `client/common/claims.py` and constants in `proto/` (see `proto/sb10.py`). One UDP port per data plane.
+2. **Claim** — `CLAIMABLE` in `hub/server.py`. Names in `ADAPTERS` are already claimable; `mic`, `magictrackpad` and opt-in `webcam` are extras. Webcam has a separate lease lifecycle, never a startup capture thread.
+3. **Transport** — UDP adapters use `DEFAULT_PORTS` in `client/common/claims.py` and constants in `proto/`. Webcam instead uses the existing HTTP port and must stay out of bulk `CONNECT`/UDP ports.
 4. **Udev** — vid/pid stay-powered + `SYSTEMD_WANTS=usb-loom-hub.service` in `deploy/99-usb-loom.rules`. `deploy/install.sh` must install any new `hub/*.py` / `proto/*.py`.
 5. **Sink or sidecar** — in-process in `client/ui.py`'s `_ensure_sinks`, or an external mapper via env (`USB_LOOM_SIDESTICK`). Do not share one ViGEm window across two adapters.
 6. **Receiver pane** — `SUPPORTED` and `_build_*_pane` in `client/ui.py`. Dest label from the Dest field. Copy states where mapping lives (this window vs sidecar).
@@ -551,8 +621,9 @@ The pane matches the job, not a generic form.
 | Needs a game map | T.A320 | Claim + open sidecar. Do not duplicate SidestickBridge curves here. |
 | Identity pad | Xbox Elite | Claim + sink health. No second mapper. |
 | Audio | USB mic | Inject target, level, optional monitor. Not a DAW. |
+| Camera | UVC webcam | Explicit Start/Stop, resolution, written-frame status; no recording. |
 
-New devices pick one of those four.
+New devices pick the shape matching their capture and privacy contract.
 
 ### Landmines
 
@@ -614,7 +685,16 @@ OS-chrome swipes (Mission Control, desktop switch) are still mostly off.
 | `hub/hid.py` | T.A320 + Xbox Elite + `generic` HID adapters |
 | `hub/trackpad.py` | Magic Trackpad → frame-boundary TP10/N1; descriptor API |
 | `hub/audio.py` | Mic → AU10 |
-| Adding a device | This README section + those three hub modules |
+| `hub/webcam.py`, `hub/v4l2_capture.py` | Opt-in UVC discovery, private camera leases and native MJPEG capture |
+| `proto/mjpeg.py`, `client/common/camera.py` | Bounded MJPEG/1 framing and credential-safe HTTP camera client |
+| `client/linux/camera.py`, `client/webcam_sink.py` | Explicit Linux virtual-camera lifecycle and foreground CLI |
+| `docs/webcam.md` | Webcam provisioning, protocol, tests, acceptance and rollback |
+| `tools/check_camera_abi.py` | Offline V4L2 C-header ABI check; no devices |
+| `hub/storage.py`, `proto/storage_wire.py` | Standalone read-only SSH helper and bounded file framing; not a UDP claim |
+| `hub/storage_unmount.py`, `deploy/storage-unmount-command` | Optional root-only selected-volume unmount; separate restricted key, no force/lazy or mount capability |
+| `client/common/storage.py`, `client/storage_ui.py` | Explicit volume browser, text preview and verified no-overwrite import |
+| `docs/storage.md` | Storage policy, restricted SSH prerequisites, filesystem caveats and gates |
+| Adding a device | This README section + the matching capture module |
 | `client/linux/` | Native touchpad, PipeWire, uinput factories, tray/signal lifecycle |
 | `client/windows/` | SendInput, WASAPI/waveOut, ViGEm factory, sidecar and window lifecycle |
 | `client/common/` | Claims, sequence guards, gesture math, settings, PCM and gamepad helpers |

@@ -79,6 +79,8 @@ def _port_open(port: int) -> bool:
 
 
 def _register_and_claim(hub: str, client_id: str, adapter: str, dest: str, *, native_touchpad: bool = False) -> dict:
+    if adapter == "webcam":
+        raise SystemExit("Use the explicit Webcam Start action or webcam_sink.py --start; camera is not a UDP claim")
     request(
         hub,
         "POST",

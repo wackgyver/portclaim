@@ -1,0 +1,9 @@
+# Optional webcam native packages for Arch/Omarchy. NOT a pip requirements file.
+# Reference only: no installer consumes this or installs/loads a kernel module.
+# Also select headers matching the RUNNING kernel exactly (linux-headers for
+# stock linux, linux-lts-headers for linux-lts, etc.). Review DKMS/Secure Boot.
+# Do not blindly change kernels, disable Secure Boot, reboot, or add video groups.
+ffmpeg
+v4l-utils
+v4l2loopback-dkms
+v4l2loopback-utils

@@ -31,6 +31,7 @@ SUPPORTED = (
     ("xboxelite", "Xbox Elite"),
     ("magictrackpad", "Magic Trackpad"),
     ("mic", "Microphone"),
+    ("webcam", "Webcam"),
 )
 
 class ReceiverApp(LegacyControlsMixin):
@@ -42,6 +43,8 @@ class ReceiverApp(LegacyControlsMixin):
         self._busy = False
         self._last_devices: list[dict] = []
         self.desktop = None
+        self.camera = None  # Created only by an explicit camera Start action.
+        self.storage_window = None  # No storage connection/mount on receiver startup.
         platforms.desktop_backend().prepare_app()
         self.root = tk.Tk()
         self.root.title("PortClaim")
@@ -69,6 +72,15 @@ class ReceiverApp(LegacyControlsMixin):
         if self.desktop is not None:
             self.desktop._show_window()
 
+    def _open_storage(self) -> None:
+        from client.storage_ui import StorageWindow
+        current = getattr(self, "storage_window", None)
+        if current is not None and current.window.winfo_exists():
+            current.window.deiconify()
+            current.window.lift()
+        else:
+            self.storage_window = StorageWindow(self.root)
+
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
         try:
@@ -92,8 +104,12 @@ class ReceiverApp(LegacyControlsMixin):
         pad = {"padx": 16, "pady": 6}
         top = ttk.Frame(self.root)
         top.pack(fill="x", **pad)
+        ttk.Button(top, text="Storage (read-only)", command=self._open_storage).pack(side="right", padx=8)
         if sys.platform == "linux":
             ttk.Button(top, text="Hide to tray", command=self._hide_window).pack(side="right")
+            # Local stop must remain reachable even when hub inventory is offline.
+            self.camera_quick_stop = ttk.Button(top, text="Stop camera", command=self._stop_camera, state="disabled")
+            self.camera_quick_stop.pack(side="right", padx=8)
         ttk.Label(top, text="PortClaim", style="Head.TLabel").pack(anchor="w")
         ttk.Label(
             top,
@@ -131,6 +147,7 @@ class ReceiverApp(LegacyControlsMixin):
         self._build_xbox_pane()
         self._build_trackpad_pane()
         self._build_mic_pane()
+        self._build_webcam_pane()
 
         self.status = ttk.Label(self.root, text="Idle.", style="Muted.TLabel")
         self.status.pack(fill="x", padx=16, pady=(0, 12))
@@ -219,6 +236,76 @@ class ReceiverApp(LegacyControlsMixin):
             wraplength=680,
         ).pack(anchor="w", pady=8)
 
+    def _build_webcam_pane(self) -> None:
+        pane = ttk.Frame(self.pane_host)
+        self.panes["webcam"] = pane
+        box = self._group(pane, "Webcam — video only")
+        supported = platforms.name() == "linux"
+        text = (
+            "Start explicitly to claim the USB camera. MJPEG is decoded locally into PortClaim Camera. "
+            "Connect does not start it. Hiding this window keeps an explicitly started camera live. "
+            "Stop or Quit releases it. No recording and no microphone changes. "
+            "Provision the loopback output first; see docs/webcam.md."
+            if supported else
+            "Webcam receiving is currently Linux-only. Windows virtual-camera injection is not implemented; "
+            "existing Windows input/audio remain available. No camera will be claimed here."
+        )
+        ttk.Label(box, text=text, style="Panel.TLabel", wraplength=680).pack(anchor="w", pady=8)
+        self.camera_mode_var = tk.StringVar(value="1280x720")
+        self.camera_mode_combo = ttk.Combobox(box, textvariable=self.camera_mode_var,
+                                              state="readonly" if supported else "disabled", width=20,
+                                              values=("640x480", "1280x720", "1920x1080"))
+        self.camera_mode_combo.pack(anchor="w")
+        ttk.Label(box, text="30 fps requested; unsupported camera modes fail rather than silently change.",
+                  style="Panel.TLabel", wraplength=680).pack(anchor="w", pady=4)
+        self.camera_start = ttk.Button(box, text="Start & claim camera", command=self._start_camera,
+                                       state="normal" if supported else "disabled")
+        self.camera_start.pack(anchor="w", pady=4)
+        self.camera_stop = ttk.Button(box, text="Stop camera", command=self._stop_camera, state="disabled")
+        self.camera_stop.pack(anchor="w", pady=4)
+        self.camera_status = ttk.Label(box, text="Camera off — explicit activation only.", style="Panel.TLabel",
+                                        wraplength=680)
+        self.camera_status.pack(anchor="w", pady=8)
+
+    def _start_camera(self) -> None:
+        backend = platforms.camera_backend()
+        if backend is None:
+            self.status.configure(text="Webcam receiving is Linux-only; nothing claimed.")
+            return
+        hub = self.hub_var.get().strip()
+        if hub and not hub.startswith("http"):
+            hub = f"http://{hub}:27180"
+        try:
+            width, height = (int(value) for value in self.camera_mode_var.get().split("x"))
+            if self.camera is None:
+                self.camera = backend.Controller()
+            self.camera.start(hub, claim._token(), self.client_id, backend.Mode(width, height, 30))
+        except (Exception, SystemExit) as exc:
+            self.camera_status.configure(text=str(exc) or type(exc).__name__)
+            return
+        self._camera_status_tick()
+
+    def _stop_camera(self) -> None:
+        if self.camera is not None:
+            self.camera.stop()
+        self._camera_status_tick()
+
+    def _camera_status_tick(self) -> None:
+        camera = getattr(self, "camera", None)
+        if camera is None:
+            return
+        state = camera.snapshot()
+        detail = state["error"] or f"{state['frames']} frames written to PortClaim Camera"
+        if state["last_frame"] and time.monotonic() - state["last_frame"] > 1:
+            detail += " — stale; output timeout armed"
+        self.camera_status.configure(text=f"Camera {state['state']}: {detail}")
+        self.camera_start.configure(state="disabled" if state["busy"] else "normal")
+        self.camera_stop.configure(state="normal" if state["busy"] else "disabled")
+        if getattr(self, "camera_quick_stop", None) is not None:
+            self.camera_quick_stop.configure(state="normal" if state["busy"] else "disabled")
+        if getattr(self, "camera_mode_combo", None) is not None:
+            self.camera_mode_combo.configure(state="disabled" if state["busy"] else "readonly")
+
     def _build_trackpad_pane(self) -> None:
         pane = ttk.Frame(self.pane_host)
         self.panes["magictrackpad"] = pane
@@ -271,12 +358,14 @@ class ReceiverApp(LegacyControlsMixin):
         return labels, meta
 
     def _refresh_devices(self) -> None:
+        selected = self._selected_adapter()
         labels, meta = self._inventory()
         self._device_meta = meta
         current = self.device_var.get()
         self.device_combo["values"] = labels
         if labels and current not in labels:
-            prefer = next((l for l in labels if "Magic Trackpad" in l), labels[0])
+            prefer = next((label for label in labels if meta[label]["adapter"] == selected),
+                          next((label for label in labels if "Magic Trackpad" in label), labels[0]))
             self.device_var.set(prefer)
         self._show_pane()
 
@@ -303,7 +392,7 @@ class ReceiverApp(LegacyControlsMixin):
         if adapter in self.panes:
             self.panes[adapter].pack(fill="both", expand=True)
         meta = getattr(self, "_device_meta", {}).get(self.device_var.get()) or {}
-        self.claim_btn.configure(state=("normal" if meta and not meta.get("claimed") else "disabled"))
+        self.claim_btn.configure(state=("normal" if meta and not meta.get("claimed") and adapter != "webcam" else "disabled"))
 
     def _toggle_connect(self) -> None:
         if self._busy:
@@ -376,6 +465,9 @@ class ReceiverApp(LegacyControlsMixin):
         adapter = self._selected_adapter()
         if not adapter:
             return
+        if adapter == "webcam":
+            self._start_camera()  # Never route camera activation through the generic UDP claim path.
+            return
         hub = self.hub_var.get().strip()
         if not hub:
             self.status.configure(text="set Hub")
@@ -406,6 +498,7 @@ class ReceiverApp(LegacyControlsMixin):
             # Sinks run independently; hidden controls need no HTTP polling or redraw.
             self.root.after(2000, self._tick)
             return
+        self._camera_status_tick()
         last = trackpad_sink.STATS.get("tp10_last") or 0.0
         packets = trackpad_sink.STATS.get("tp10_packets") or 0
         mode = trackpad_sink.STATS.get("tp10_mode") or "-"
@@ -454,7 +547,9 @@ class ReceiverApp(LegacyControlsMixin):
                 for row in getattr(self, "_last_devices", [])
                 if "mic" in (row.get("adapters") or [])
             ),
-            "no USB mic on hub",
+            next((row["mic_selection"] for row in getattr(self, "_last_devices", [])
+                  if row.get("kind") == "audio" and row.get("mic_selection")),
+                 "no selected microphone capture source on hub"),
         )
         self.mic_source.configure(text=f"Hub source: {source}")
         self._refresh_devices()
@@ -464,8 +559,24 @@ class ReceiverApp(LegacyControlsMixin):
         try:
             self.root.mainloop()
         finally:
-            if self.desktop is not None:
-                self.desktop.close()
+            try:
+                if getattr(self, "storage_window", None) is not None:
+                    self.storage_window.close()
+                    # Mainloop has ended: give cancellation a bounded cleanup
+                    # window before daemon threads/interpreter exit can strand a
+                    # local partial. Never join from the Storage close callback.
+                    worker = self.storage_window._thread
+                    if worker is not None:
+                        worker.join(timeout=4)
+                        if worker.is_alive():
+                            print("Storage cancellation still pending; partial imports are not complete files.", file=sys.stderr)
+            finally:
+                try:
+                    if self.camera is not None:
+                        self.camera.close()
+                finally:
+                    if self.desktop is not None:
+                        self.desktop.close()
         return 0
 
 

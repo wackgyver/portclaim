@@ -20,7 +20,14 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with tarfile.open(first) as archive:
                 names = archive.getnames()
+                for expected in ('client/linux/camera.py', 'client/common/camera.py', 'client/webcam_sink.py',
+                                 'proto/mjpeg.py', 'docs/webcam.md', 'deploy/linux/packages-camera.arch.txt',
+                                 'client/storage_ui.py', 'client/common/storage.py',
+                                 'proto/storage_wire.py', 'docs/storage.md'):
+                    self.assertIn('portclaim-linux/' + expected, names)
                 self.assertFalse(any('/windows/' in n or n.endswith('.dll') or '/test_' in n for n in names))
+                self.assertFalse(any('/hub/' in n or n.endswith('/storage-unmount-command') for n in names),
+                                 'privileged hub helpers must not enter the receiver artifact')
                 # Extract only our own verified, relative regular-file members.
                 for member in archive.getmembers():
                     self.assertTrue(member.isfile())
@@ -39,3 +46,4 @@ class PackageTests(unittest.TestCase):
             self.assertTrue(result['native_touchpad'])
             self.assertFalse(result['windows_backend_imported'])
             self.assertFalse(result['driver_imported'])
+            self.assertEqual(result['camera_backend'], 'client.linux.camera')

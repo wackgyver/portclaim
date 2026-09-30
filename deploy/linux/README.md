@@ -46,6 +46,39 @@ cannot cause an unrelated sink to be unloaded. Existing `portclaim_mic` sinks ar
 borrowed, not owned. Recording applications should select `portclaim_mic.monitor`
 (or use app-specific routing), not change the desktop default source.
 
+## Optional webcam (video-only preview)
+
+Camera code is included but remains inactive until explicit **Webcam → Start &
+claim camera** (or `client/webcam_sink.py --start`). Bulk Connect and service
+startup do not activate it. Hiding an explicitly started camera keeps it live;
+Stop Camera or Quit stops it. It does not select a webcam microphone.
+
+See [webcam setup and acceptance](../../docs/webcam.md) and the reference-only
+[Arch native package list](packages-camera.arch.txt). FFmpeg and a dedicated
+exclusive-caps `v4l2loopback` output are additional optional prerequisites. This
+installer **never** installs/loads a kernel module, grants device permissions,
+claims a camera or modifies the hub. `USB_LOOM_CAMERA_OUTPUT` has no default and
+must identify the separately provisioned `PortClaim Camera` node. Hub enablement,
+route-preserving deployment and first capture require separate approval.
+
+## Optional read-only Storage
+
+The explicit **Storage (read-only)** window uses a dedicated restricted OpenSSH
+alias (`USB_LOOM_STORAGE_SSH`), never the hub administrative alias/control token.
+It browses separately approved read-only USB ext4 mounts, previews bounded text,
+and copies selected files to new local destinations. No exports, automatic
+mounting/connection, SSH keys/accounts or policy are installed. OpenSSH is an
+optional native prerequisite; no additional Python dependency is needed.
+Save suggests a safe basename, but still requires local destination confirmation.
+Optional **Unmount selected volume…** requires a separately provisioned unmount-only
+key (`USB_LOOM_STORAGE_UNMOUNT_SSH`) paired with the configured read alias and an
+explicit per-volume hub policy. It refuses active transfers/busy mounts, never
+forces or lazily detaches, and never remounts automatically. The receiver installer
+does not provision this privileged control.
+
+See [storage setup, limits and acceptance](../../docs/storage.md). Hub helper
+provisioning and receiver activation require their own approved deployment.
+
 ## Layout and upgrades
 
 ```text

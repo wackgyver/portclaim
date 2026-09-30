@@ -14,7 +14,8 @@ from client.common.gamepad import STATS, GamepadWriter, decode_sb10, u16_to_thum
 
 
 def serve(port):
-    gamepad.serve(port, platforms.gamepad_backend().create_pad)
+    backend = platforms.gamepad_backend()
+    gamepad.serve(port, backend.create_pad, invert_y=backend.INVERT_Y)
 
 
 def main(argv=None):

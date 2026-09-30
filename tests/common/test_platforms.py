@@ -2,11 +2,20 @@
 import os
 import unittest
 from unittest.mock import patch
-from client import claim, trackpad_sink, platforms
+from client import claim, trackpad_sink, xbox_sink, platforms
 from client.common import claims
 
 
 class PlatformSelectionTests(unittest.TestCase):
+    def test_xbox_sink_passes_each_platforms_y_policy_without_opening_a_device(self):
+        for platform, expected in (("linux", False), ("win32", True)):
+            with self.subTest(platform=platform), patch.object(platforms.sys, "platform", platform), patch.object(
+                    xbox_sink.gamepad, "serve") as serve:
+                backend = platforms.gamepad_backend()
+                xbox_sink.serve(27185)
+                self.assertIs(backend.INVERT_Y, expected)
+                serve.assert_called_once_with(27185, backend.create_pad, invert_y=expected)
+
     def test_windows_never_selects_linux_native_touchpad(self):
         for backend in (None, "native", "legacy"):
             with self.subTest(backend=backend), patch.dict(os.environ), patch.object(platforms.sys, "platform", "win32"):

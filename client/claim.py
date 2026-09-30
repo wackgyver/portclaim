@@ -122,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     conn.add_argument("--no-trackpad", action="store_true", help="claim only, do not run the sink")
 
     args = parser.parse_args(argv)
+    if args.cmd in {"claim", "release"} and args.adapter == "webcam":
+        parser.error("Use the Webcam Start/Stop controls or webcam_sink.py --start (Ctrl+C stops); leases stay private")
     if not args.hub:
         raise SystemExit("set --hub or USB_LOOM_HUB")
     hub = args.hub if args.hub.startswith("http") else f"http://{args.hub}:27180"

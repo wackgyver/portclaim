@@ -10,6 +10,7 @@ Data:    UDP SB10 (HID), AU10 (mic), or TP10 (trackpad) to the claimed dest
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import socket
@@ -26,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 import audio as audio_hub  # noqa: E402
 import trackpad as trackpad_hub  # noqa: E402
+import webcam as webcam_hub  # noqa: E402
 from hid import (  # noqa: E402
     ADAPTERS,
     EvdevDevice,
@@ -34,7 +36,7 @@ from hid import (  # noqa: E402
     open_matching,
 )
 
-CLAIMABLE = set(ADAPTERS) | {"mic", "magictrackpad"}
+CLAIMABLE = set(ADAPTERS) | {"mic", "magictrackpad", "webcam"}
 HID_ADAPTERS = set(ADAPTERS)
 
 DEFAULT_TOKEN = os.environ.get("USB_LOOM_TOKEN", "").strip()
@@ -46,13 +48,15 @@ class Registry:
         # device adapter name -> {client_id, dest_host, dest_port, claimed_at}
         self.routes: dict[str, dict] = {}
         self.clients: dict[str, dict] = {}
+        self.camera = webcam_hub.Camera(enabled=os.environ.get("USB_LOOM_CAMERA_ENABLED") == "1")
 
     def snapshot(self) -> dict:
         with self.lock:
-            return {
-                "clients": dict(self.clients),
-                "routes": dict(self.routes),
-            }
+            result = {"clients": dict(self.clients), "routes": dict(self.routes)}
+        camera = self.camera.route()
+        if camera:
+            result["routes"]["webcam"] = camera
+        return result
 
     def register(self, body: dict) -> dict:
         client_id = str(body.get("id") or "").strip()
@@ -69,7 +73,9 @@ class Registry:
             self.clients[client_id] = rec
         return rec
 
-    def claim(self, adapter: str, body: dict) -> dict:
+    def claim(self, adapter: str, body: dict, peer: str = "") -> dict:
+        if adapter == "webcam":
+            return self.camera.claim(body, peer)
         if adapter not in CLAIMABLE:
             raise ValueError(f"unknown adapter {adapter}")
         dest = body.get("dest") or ""
@@ -92,11 +98,16 @@ class Registry:
             self.routes[adapter] = route
         return route
 
-    def release(self, adapter: str) -> None:
+    def release(self, adapter: str, *, lease: str = "", peer: str = "") -> None:
+        if adapter == "webcam":
+            self.camera.release(lease, peer)
+            return
         with self.lock:
             self.routes.pop(adapter, None)
 
     def route(self, adapter: str) -> dict | None:
+        if adapter == "webcam":
+            return self.camera.route()
         with self.lock:
             rec = self.routes.get(adapter)
             return dict(rec) if rec else None
@@ -130,35 +141,55 @@ def inventory() -> list[dict]:
         )
         dev.close()
     rows.extend(audio_hub.inventory())
+    for row in webcam_hub.inventory():
+        row["camera_enabled"] = REG.camera.enabled
+        if not REG.camera.enabled:
+            row["adapters"] = []
+        rows.append(row)
     return rows
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("hub: " + (fmt % args) + "\n")
+        if getattr(self, "path", "").startswith("/v1/devices/webcam"):
+            # Never log camera URLs, headers, lease credentials or image bytes.
+            sys.stderr.write("hub: webcam request completed\n")
+        else:
+            sys.stderr.write("hub: " + (fmt % args) + "\n")
 
     def _auth(self) -> bool:
         token = self.headers.get("X-Usb-Loom-Token", "")
-        return bool(DEFAULT_TOKEN) and token == DEFAULT_TOKEN
+        return bool(DEFAULT_TOKEN) and hmac.compare_digest(token.encode(), DEFAULT_TOKEN.encode())
 
     def _json(self, code: int, payload: dict | list) -> None:
         raw = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
+        if self.headers.get("Transfer-Encoding") or length < 0 or length > 65536:
+            raise ValueError("invalid control request length")
+        if length == 0:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        self.connection.settimeout(3)
+        body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        if not isinstance(body, dict):
+            raise ValueError("control request must be an object")
+        return body
 
     def do_GET(self) -> None:
         if not self._auth():
             return self._json(401, {"error": "token"})
         path = urlparse(self.path).path
+        if path == webcam_hub.mjpeg.STREAM_PATH:
+            if self.path != path:
+                return self._json(400, {"error": "camera credentials belong in headers, not URLs"})
+            return self._camera_stream()
         if path == "/v1/health":
             return self._json(200, {"ok": True, "role": "hub"})
         if path == "/v1/devices/magictrackpad/descriptor":
@@ -172,6 +203,45 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, REG.snapshot())
         return self._json(404, {"error": "not found"})
 
+    def _camera_stream(self) -> None:
+        started = False
+        self.close_connection = True
+        self.connection.settimeout(1)
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
+        try:
+            camera = REG.camera
+            token = self.headers.get(webcam_hub.mjpeg.LEASE_HEADER, "")
+            with camera.session(token, self.client_address[0]) as (lease, capture):
+                sequence = 0
+                while camera.alive(lease):
+                    frame = capture.read()
+                    if frame is None:
+                        continue
+                    webcam_hub.mjpeg.validate_jpeg(frame, lease.mode)
+                    if not camera.alive(lease):
+                        break
+                    if not started:
+                        self.send_response(200)
+                        self.send_header("Content-Type", webcam_hub.mjpeg.CONTENT_TYPE)
+                        self.send_header("Cache-Control", "no-store, private")
+                        self.send_header("X-Accel-Buffering", "no")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        started = True
+                    sequence += 1
+                    self.wfile.write(webcam_hub.mjpeg.frame_header(len(frame), sequence))
+                    self.wfile.write(frame)
+                    self.wfile.write(b"\r\n")
+                    camera.touch(lease)
+                if not started:
+                    self._json(503, {"error": "camera did not produce a frame before lease expiry"})
+        except (webcam_hub.CameraError, OSError, ValueError) as exc:
+            if not started:
+                try:
+                    self._json(getattr(exc, "status", 503), {"error": "camera unavailable: " + str(exc)})
+                except OSError:
+                    pass  # Disconnected requester; context manager already closed capture.
+
     def do_POST(self) -> None:
         if not self._auth():
             return self._json(401, {"error": "token"})
@@ -182,11 +252,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, REG.register(body))
             if path.startswith("/v1/devices/") and path.endswith("/claim"):
                 adapter = path.split("/")[3]
-                return self._json(200, REG.claim(adapter, body))
+                return self._json(200, REG.claim(adapter, body, self.client_address[0]))
             if path.startswith("/v1/devices/") and path.endswith("/release"):
                 adapter = path.split("/")[3]
-                REG.release(adapter)
+                REG.release(adapter, lease=self.headers.get(webcam_hub.mjpeg.LEASE_HEADER, ""),
+                            peer=self.client_address[0])
                 return self._json(200, {"released": adapter})
+        except webcam_hub.CameraError as exc:
+            return self._json(exc.status, {"error": str(exc)})
         except (ValueError, json.JSONDecodeError, KeyError, IndexError) as exc:
             return self._json(400, {"error": str(exc)})
         return self._json(404, {"error": "not found"})
@@ -262,9 +335,13 @@ def main(argv: list[str] | None = None) -> int:
         print("USB_LOOM_TOKEN is required", file=sys.stderr)
         return 2
     adapters = args.adapter or (list(ADAPTERS) + ["mic", "magictrackpad"])
+    if args.adapter is not None and "webcam" not in args.adapter:
+        REG.camera.enabled = False
     httpd = ThreadingHTTPServer((args.bind, args.control_port), Handler)
     print(f"usb-loom hub control http://{args.bind}:{args.control_port}  (token is set)")
     for name in adapters:
+        if name == "webcam":
+            continue  # HTTP pull only; no idle stream/capture thread.
         if name == "mic":
             threading.Thread(
                 target=audio_hub.stream_mic,

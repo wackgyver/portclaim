@@ -2,8 +2,6 @@
 """SB10 identity Xbox 360 sink: changed reports, with independent fail-safe release."""
 from __future__ import annotations
 
-import argparse
-import os
 import socket
 import struct
 import time
@@ -13,7 +11,9 @@ from client.common.stream_guard import StreamGuard
 MAGIC = 0x30314253
 HEADER = struct.Struct("<I I H H H H I I")
 STATS = {"xb10_last": 0.0, "xb10_packets": 0, "xb10_updates": 0, "listening": False, "error": ""}
-INVERT_Y = True  # Linux xpad Y is inverted vs XInput.
+# Backward-compatible default for direct XInput callers. The application edge
+# must pass the selected backend's policy: evdev is down-positive, XInput up-positive.
+INVERT_Y = True
 
 
 def decode_sb10(packet: bytes) -> tuple[int, int, int, int, int, int, int] | None:
@@ -38,7 +38,10 @@ def pov_to_hat(pov: int) -> tuple[int, int]:
 
 
 class GamepadWriter:
-    def __init__(self, pad, vg):
+    def __init__(self, pad, vg, *, invert_y: bool = INVERT_Y):
+        if type(invert_y) is not bool:
+            raise ValueError("gamepad invert_y policy must be a boolean")
+        self.invert_y = invert_y
         self.pad = pad
         self.last_state = None
         names = ("A", "B", "X", "Y", "LEFT_SHOULDER", "RIGHT_SHOULDER", "BACK", "START", "LEFT_THUMB", "RIGHT_THUMB", "GUIDE")
@@ -53,8 +56,8 @@ class GamepadWriter:
             return False
         x, y, z, r, buttons, pov = state
         pad = self.pad
-        pad.left_joystick(u16_to_thumb(x), u16_to_thumb(y, INVERT_Y))
-        pad.right_joystick(u16_to_thumb(z), u16_to_thumb(r, INVERT_Y))
+        pad.left_joystick(u16_to_thumb(x), u16_to_thumb(y, self.invert_y))
+        pad.right_joystick(u16_to_thumb(z), u16_to_thumb(r, self.invert_y))
         pad.left_trigger((buttons >> 16) & 0xFF)
         pad.right_trigger((buttons >> 24) & 0xFF)
         for bit, btn in self.mapping:
@@ -73,13 +76,15 @@ class GamepadWriter:
             self.last_state = None
 
 
-def serve(port: int, create_pad) -> None:
+def serve(port: int, create_pad, *, invert_y: bool = INVERT_Y) -> None:
     STATS.update(error="", listening=False)
     sock = None
     writer = None
     try:
+        if type(invert_y) is not bool:
+            raise ValueError("gamepad invert_y policy must be a boolean")
         pad, vg = create_pad()
-        writer = GamepadWriter(pad, vg)
+        writer = GamepadWriter(pad, vg, invert_y=invert_y)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", port))
         sock.settimeout(0.1)

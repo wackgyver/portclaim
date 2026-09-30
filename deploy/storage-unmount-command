@@ -1,0 +1,5 @@
+#!/bin/sh
+# Optional fixed forced command for a separately authorized unmount-only key.
+# Never forward SSH_ORIGINAL_COMMAND, arguments, or caller Python environment.
+umask 077
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/prlimit --as=268435456 --nofile=128 -- /usr/bin/python3 -I /usr/local/lib/usb-loom/storage_unmount.py

@@ -51,12 +51,20 @@ def desktop_backend():
     return desktop
 
 
+def camera_backend():
+    if name() != "linux":
+        return None  # No pretend Windows virtual camera; existing backends are unchanged.
+    from client.linux import camera
+    return camera
+
+
 def diagnostics():
     """Driver-free packaging smoke: import only the selected adapters."""
     return {
         "platform": name(), "native_touchpad": native_backend(),
         "audio_backend": audio_backend().__name__, "input_backend": input_backend().__name__,
         "gamepad_backend": gamepad_backend().__name__, "desktop_backend": desktop_backend().__name__,
+        "camera_backend": camera_backend().__name__ if name() == "linux" else None,
         "driver_imported": "vgamepad" in sys.modules,
         "linux_backend_imported": any(n.startswith("client.linux.") for n in sys.modules),
         "windows_backend_imported": any(n.startswith("client.windows.") for n in sys.modules),

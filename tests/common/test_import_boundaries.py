@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as d:
 ''')
 
     def test_original_entrypoint_help_commands(self):
-        for command in ('receiver_app.py', 'claim.py', 'trackpad_sink.py', 'mic_sink.py', 'xbox_sink.py'):
+        for command in ('receiver_app.py', 'claim.py', 'trackpad_sink.py', 'mic_sink.py', 'xbox_sink.py', 'webcam_sink.py'):
             with self.subTest(command=command):
                 result = subprocess.run([sys.executable, str(ROOT / 'client' / command), '--help'],
                                         cwd=ROOT.parent, text=True, capture_output=True, timeout=15)

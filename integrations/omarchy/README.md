@@ -19,3 +19,12 @@ app-specific ALSA/Pulse routing if it only offers Default. Do not change the who
 desktop's default microphone merely to route one application. Configure shortcuts
 separately, check for collisions, and update Omarchy's keybinding learner whenever
 remapping one. No specific shortcut is reserved by this package.
+
+## Optional webcam
+
+See [the webcam guide](../../docs/webcam.md) for dedicated V4L2 loopback setup,
+matching-kernel prerequisites and explicit activation. No Hyprland camera rule,
+shortcut, default-camera change or extra desktop daemon is installed. The
+receiver's Webcam pane is video-only; it does not replace Handy's input routing.
+Provisioning the output, enabling the hub feature, and testing real camera
+applications are separate from installing this Omarchy profile.

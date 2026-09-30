@@ -67,6 +67,52 @@ class GamepadTests(unittest.TestCase):
         self.pad.press_button.assert_any_call(XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
 
 
+    def test_both_sticks_follow_explicit_polarity_at_endpoints_and_center(self):
+        for invert in (False, True):
+            for raw in (0, 16384, 32768, 49152, 65535):
+                with self.subTest(invert=invert, raw=raw):
+                    pad = MagicMock()
+                    writer = xbox_sink.GamepadWriter(pad, types.SimpleNamespace(XUSB_BUTTON=XUSB_BUTTON), invert_y=invert)
+                    writer.apply((raw, raw, raw, raw, 0, 65535))
+                    x = raw - 32768
+                    y = max(-32768, min(32767, -x)) if invert else x
+                    pad.left_joystick.assert_called_once_with(x, y)
+                    pad.right_joystick.assert_called_once_with(x, y)
+
+    def test_windows_policy_retains_legacy_xinput_values(self):
+        from client.windows import gamepad as windows
+        self.assertIs(windows.INVERT_Y, True)
+        explicit_pad = MagicMock()
+        explicit = xbox_sink.GamepadWriter(explicit_pad, types.SimpleNamespace(XUSB_BUTTON=XUSB_BUTTON), invert_y=windows.INVERT_Y)
+        for state in ((0, 0, 65535, 65535, 0, 0), self.idle, (65535, 65535, 0, 0, 255 << 24, 18000)):
+            self.writer.apply(state); explicit.apply(state)
+        self.assertEqual(self.pad.mock_calls, explicit_pad.mock_calls)
+
+    def test_serve_delivers_axis_policy_to_writer_and_still_neutralizes(self):
+        packet = xbox_sink.HEADER.pack(xbox_sink.MAGIC, 1, 32768, 0, 32768, 65535, 0, 65535)
+        for invert in (False, True):
+            with self.subTest(invert=invert), patch.object(xbox_sink.socket, "socket") as socket_factory, patch.dict(xbox_sink.STATS):
+                pad = MagicMock(); sock = socket_factory.return_value
+                sock.recvfrom.side_effect = [(packet, ("192.0.2.1", 27185)), KeyboardInterrupt]
+                xbox_sink.serve(0, lambda: (pad, types.SimpleNamespace(XUSB_BUTTON=XUSB_BUTTON)), invert_y=invert)
+                pad.left_joystick.assert_called_once_with(0, 32767 if invert else -32768)
+                pad.right_joystick.assert_called_once_with(0, -32767 if invert else 32767)
+                pad.reset.assert_called_once(); sock.close.assert_called_once()
+                self.assertFalse(xbox_sink.STATS["listening"])
+                self.assertEqual(xbox_sink.STATS["error"], "")
+
+    def test_invalid_axis_policy_fails_before_creating_device(self):
+        for invalid in (None, "false", 0, 1):
+            with self.subTest(value=invalid), patch.dict(xbox_sink.STATS):
+                factory = MagicMock()
+                xbox_sink.serve(0, factory, invert_y=invalid)
+                factory.assert_not_called()
+                self.assertFalse(xbox_sink.STATS["listening"])
+                self.assertIn("must be a boolean", xbox_sink.STATS["error"])
+                with self.assertRaises(ValueError):
+                    xbox_sink.GamepadWriter(self.pad, types.SimpleNamespace(XUSB_BUTTON=XUSB_BUTTON), invert_y=invalid)
+
+
 class AudioTests(unittest.TestCase):
     def packet(self, seq=1, rate=44100, channels=1, pcm=b'\0\0' * 441):
         return struct.pack('<IIIBBH', mic_sink.MAGIC, seq, rate, channels, 16, len(pcm)) + pcm

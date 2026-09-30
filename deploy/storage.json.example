@@ -1,0 +1,12 @@
+{
+  "volumes": [
+    {
+      "id": "media",
+      "label": "Approved USB volume",
+      "root": "/run/portclaim-storage/media",
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "caveat": "Filesystem consistency has not been verified. Keep inspection read-only.",
+      "allow_unmount": false
+    }
+  ]
+}

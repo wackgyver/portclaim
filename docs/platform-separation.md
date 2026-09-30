@@ -11,18 +11,20 @@ Do not merge/release a platform until its relevant gates actually pass.
 ## Layout and ownership
 
 ```text
-hub/                         Shared Linux USB capture/control service (unchanged)
-proto/                       SB10, AU10, legacy TP10 and native TP10/N1
+hub/                         Linux USB capture/control; standalone optional SSH storage helper
+proto/                       SB10, AU10, TP10/N1, camera MJPEG/1, bounded storage framing
 client/
   common/                    HTTP claims, codecs/helpers, config, gesture math,
                              shared gamepad state/transport and stream guards
   windows/                   SendInput, WASAPI/waveOut, ViGEm factory, sidecar,
                              normal visible-window lifecycle
   linux/                     Native touchpad, PipeWire, uinput factories,
-                             AppIndicator/signal lifecycle and native settings pane
+                             AppIndicator/signal lifecycle, native settings pane,
+                             explicit MJPEG decoder / dedicated virtual camera
   platforms.py               Lazy adapter selection; driver-free diagnostics
   receiver_app.py            Compatible CLI / application entry point
   ui.py                      Shared Tk mapping/claim shell
+  storage_ui.py              Explicit shared read-only volume browser; no startup I/O
   legacy_ui.py               Shared legacy gesture controls
   {claim,mic_sink,trackpad_sink,xbox_sink}.py  Compatible CLI facades
 integrations/omarchy/         Opt-in device profile; never auto-applied
@@ -45,22 +47,43 @@ config, stream-guard, native-touchpad, tray and WASAPI modules.
 - The application edge selects adapters. Windows always uses the legacy gesture
   engine, even with `USB_LOOM_TP_BACKEND=native`. Native Linux bypasses that engine.
 - Gamepad factories load vgamepad only when starting the sink. Import/build probes
-  must not connect to ViGEm or create uinput devices.
+  must not connect to ViGEm or create uinput devices. Each backend declares its
+  `INVERT_Y` policy, passed explicitly by `xbox_sink` to the common writer: Linux
+  preserves evdev's down-positive Y; Windows converts to up-positive XInput Y.
+  The common API's historical XInput default remains for direct callers.
 - Linux runtime/source artifacts exclude Windows adapters. The Windows frozen
   build excludes Linux adapters and their input/tray dependencies.
 - Shared UI has no Windows process/DLL or Linux tray/signal implementation.
   Linux native settings direct users to the compositor; Windows/legacy settings
   retain the existing gesture controls. Windows-only speaker monitoring stays
   absent from the Linux controls.
+- Webcam receiving is Linux-only. Windows camera selection cannot claim/open the
+  camera. Bulk Connect never includes it on either platform; optional camera
+  dependencies and module provisioning are not part of the base installer.
+- Read-only Storage uses common OpenSSH transport and an explicit shared Tk window,
+  not Linux device libraries in common code or plain-HTTP file serving. Its hub
+  helper has no listener and requires independently provisioned restricted SSH
+  access plus administrator-approved read-only USB ext4 mounts. No automatic
+  mount, export/write, generic claim or media execution exists. Optional explicit
+  unmount uses a separate forced-command key and root-owned Linux helper, not
+  privileged browsing or a general admin alias. It never forces a busy unmount.
+  Save suggests a sanitized basename without selecting a destination implicitly.
+  See [Storage](storage.md).
 - Configuration loads explicitly at application entry, not on common API import.
   Credentials, filled env files and machine-specific settings are never packaged.
 
 ## Stable contracts
 
 The extraction retains the legacy gesture algorithm, SendInput payloads,
-WASAPI/waveOut path, shared gamepad mapping and native input protocol. Transport
-bytes, hub capture and the HTTP API are not redesigned. The native codec supports
-both package imports and existing flat hub installations.
+WASAPI/waveOut path, shared gamepad buttons/triggers and native input protocol.
+The subsequent Xbox Y correction fixes both Linux stick axes without changing
+Windows values or adding user mapping settings. Existing
+input/audio bytes and HTTP endpoints are retained. The optional [webcam](webcam.md)
+adds separate authenticated HTTP leases/streaming, not a change to HID UDP. The native codec supports
+both package imports and existing flat hub installations. Hub microphone pinning
+uses `USB_LOOM_MIC_USB_ID` to preserve the selected condenser when a composite
+webcam is added; missing/ambiguous pinned devices never fall back to another
+microphone. PCM format, gain and AU10 bytes remain unchanged.
 
 Native trackpad claims still request `native_touchpad: true` and 100 ms idle
 heartbeats; Windows/legacy retain the original cadence. TP10/N1 preserves the old
@@ -100,7 +123,14 @@ are not CI steps.
    mic ownership, shell syntax, offline verification of the rendered systemd unit
    (including spaces/percent paths), dependency imports, deterministic source
    packaging and an unpacked artifact import probe. Mocked systemd/uinput tests are not clean-host desktop
-   or real libinput acceptance.
+   or real libinput acceptance. Camera checks add fake-capture HTTP lifecycle,
+   bounded frame parsing, virtual-output mocks, a real synthetic FFmpeg decode,
+   and offline V4L2 C-header ABI checks—never physical capture or module setup.
+   `tests/linux/test_gamepad.py` runs again after runtime dependency installation:
+   it drives hub/SB10 states through the real installed vgamepad report/update
+   code, intercepting all events in RAM and forbidding uinput creation. This
+   checks native stick direction, endpoints, buttons, triggers, hats and reset
+   behavior rather than only asserting mocked XInput argument values.
 3. **Windows:** mocked audio/input/lifecycle, actual Windows ctypes ABI, safe
    dependency prep, PowerShell parsing, frozen executable build and import probe.
    ViGEmBus, VB-CABLE, real SendInput and audio/device acceptance remain separate.
@@ -113,6 +143,7 @@ python -m unittest discover -s tests/linux -t .    # Linux
 python -m unittest discover -s tests/hub -t .      # Linux
 python -m unittest discover -s tests/windows -t . # Windows; mocks can also run on Linux
 python tools/check_linux_unit.py                 # Offline syntax only; no service changes
+python tools/check_camera_abi.py                 # Linux C headers only; no camera ioctls
 python tools/package_linux.py
 ```
 
